@@ -37,7 +37,7 @@ cp .env.example .env  # edit every required value
 python -m bot.main
 ```
 
-The bot verifies MongoDB at startup and creates its indexes once. It runs as long polling with Pyrofork, appropriate for low-cost worker hosting.
+The bot verifies MongoDB at startup and creates its indexes once. It runs as long polling with Pyrofork, appropriate for low-cost worker hosting. It also binds `0.0.0.0:$PORT` (default `8080`) with `/` and `/healthz` so Koyeb health checks do not terminate the worker.
 
 ## First-time administrator workflow
 
@@ -46,6 +46,8 @@ The bot verifies MongoDB at startup and creates its indexes once. It runs as lon
 3. Add the bot as an administrator with permission to post in the private storage channel, set `STORAGE_CHANNEL_ID`, then use **Storage Status/Test** in `/admin` to verify it. Start an upload with `/newcollection Title | category_id | price | optional description`; every cover and uploaded media message is copied into the storage channel before the collection is published.
 4. Open **Shorteners** and configure records with `name`, `api_url`, `api_key`, `domain`, `enabled`, `reward_tokens`, `cooldown_hours`, `alias_enabled`, and `alias_prefix`. Keys are masked in UI.
 5. Adjust economy values via `/set daily_free_limit 10`, `/set referral_reward 5`, `/set checkin_base_reward 2`, `/set checkin_streak_bonus 1`, `/set cleanup_enabled true`, `/set cleanup_after_minutes 10`, or `/set maintenance_mode true`.
+
+Admins can temporarily test optional Pyrofork button styling with `/buttonstyles`; this does not alter any production keyboard.
 
 Admin user tools: `/ban ID reason`, `/unban ID`, `/tokens ID +/-amount`. Each balance adjustment receives an immutable transaction log. Reply to broadcast media/text with `/broadcast` in an extended deployment handler.
 

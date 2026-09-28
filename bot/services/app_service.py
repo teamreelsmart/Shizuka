@@ -37,6 +37,7 @@ class AppService:
   if blocked:await q.answer('Account unavailable.',show_alert=True);return
   p=q.data.split(':'); action=p[0]
   if action=='noop':return
+  if action=='style': return await q.answer('Styled keyboard test button received.')
   if action=='menu': return await self.menu(q,p[1],u)
   if action=='nav':
    c=await self.collections.get(p[2]); n=await self.collections.adjacent(c,p[1]) if c else None
@@ -132,6 +133,12 @@ class AppService:
    except Exception: return await m.reply_text('❌ Could not archive media to the Storage Channel. Use Admin → Storage Status/Test, then retry.')
    await self.db.admin_sessions.update_one({'_id':session['_id']},{'$push':{'media':media}});return await m.reply_text('Media stored permanently. Send more or /finishcollection.')
   text=m.text or ''; parts=text.split(maxsplit=2)
+  if text == '/buttonstyles':
+   from bot.utils.button_styles import test_keyboard
+   keyboard, error = test_keyboard()
+   if error:
+    return await m.reply_text('⚠️ ButtonStyle is not supported by the installed Pyrofork runtime: ' + error)
+   return await m.reply_text('Temporary ButtonStyle compatibility test. Telegram should render PRIMARY blue, SUCCESS green, and DANGER red.', reply_markup=keyboard)
   if text.startswith('/newcollection '):
    values=[x.strip() for x in text[len('/newcollection '):].split('|')]
    if len(values)<3:return await m.reply_text('Usage: /newcollection Title | category_id | price | optional description')
