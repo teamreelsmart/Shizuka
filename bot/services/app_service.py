@@ -76,7 +76,12 @@ class AppService:
    if not await self.users.daily_view(u['telegram_id'],s['daily_free_limit']):return await self.edit(q,'🎬 Your free daily limit has been reached. Unlock collections to receive all media.',K([[B('💰 Earn Tokens','menu:earn')],[B('📦 Browse Collections','menu:start'),B('🏠 Main Menu','menu:home')]]))
    c=await self.collections.latest();return await self.show_collection(q,u,c) if c else await self.edit(q,'📭 No active collections are available yet.',kb.back())
  async def show_collection(self,q,u,c):
-  s=await self.settings.get();await self.collections.viewed(u['telegram_id'],c,s['view_window_seconds']);cat=await self.db.categories.find_one({'_id':ObjectId(c['category_id'])}) if c.get('category_id') else None;saved=bool(await self.db.saved_collections.find_one({'user_id':u['telegram_id'],'collection_id':c['_id']}));await self.edit(q,collection_text(c,(cat or {}).get('name','Uncategorized')),kb.card(str(c['_id']),saved))
+  s=await self.settings.get();await self.collections.viewed(u['telegram_id'],c,s['view_window_seconds']);cat=await self.db.categories.find_one({'_id':ObjectId(c['category_id'])}) if c.get('category_id') else None;saved=bool(await self.db.saved_collections.find_one({'user_id':u['telegram_id'],'collection_id':c['_id']}));text=collection_text(c,(cat or {}).get('name','Uncategorized')); markup=kb.card(str(c['_id']),saved)
+  try:
+   from pyrogram.types import InputMediaPhoto
+   if q.message.photo: return await q.message.edit_media(InputMediaPhoto(c['cover_file_id'],caption=text),reply_markup=markup)
+   await q.message.reply_photo(c['cover_file_id'],caption=text,reply_markup=markup); return await self.edit(q,'📦 <b>Collection card opened below.</b>',kb.back())
+  except Exception: return await self.edit(q,text,markup)
  async def collection_action(self,q,u,p):
   c=await self.collections.get(p[2]);
   if not c:return await q.answer('This collection no longer exists.',show_alert=True)
@@ -105,19 +110,59 @@ class AppService:
   if not self.admin_ok(m.from_user.id):return await m.reply_text('❌ You are not authorized to access the admin panel.')
   await m.reply_text('🛠 <b>ADMIN PANEL</b>',reply_markup=admin_kb())
  async def admin_callback(self,q,p):
-  if not self.admin_ok(q.from_user.id):return await q.answer('Unauthorized.',show_alert=True)
-  section=p[0]
-  if section=='collections':return await self.edit(q,'🗂 <b>COLLECTIONS</b>\nUse /newcollection to start a guided upload.\nUse /listcollections to inspect stored collections.',K([[B('➕ Add Collection','admin:flow:newcollection')],[B('🏠 Admin Menu','admin:home')]]))
-  if section=='categories':return await self.edit(q,'📂 <b>CATEGORIES</b>\nUse /newcategory <name> | <description> to create a category.\nUse /listcategories to list them.',K([[B('🏠 Admin Menu','admin:home')]]))
-  if section=='shorteners':return await self.edit(q,'🔗 <b>SHORTENERS</b>\nUse /newshortener to begin the secure guided configuration. API keys are never displayed.',K([[B('🏠 Admin Menu','admin:home')]]))
+  if not self.admin_ok(q.from_user.id): return await q.answer('Unauthorized.',show_alert=True)
+  section=p[0]; action=p[1] if len(p)>1 else None
+  if section=='home': return await self.edit(q,'🛠 <b>ᴀᴅᴍɪɴ ᴘᴀɴᴇʟ</b>',admin_kb())
   if section=='storage':
-   ok, report=await self.storage.status(self.app);return await self.edit(q,report,K([[B('🔄 Test Again','admin:storage')],[B('🏠 Admin Menu','admin:home')]]))
+   _, report=await self.storage.status(self.app); return await self.edit(q,report,K([[B('🔄 Test Again','admin:storage')],[B('🏠 Admin Menu','admin:home')]]))
+  if section=='shorteners' and action=='add':
+   await self.db.admin_sessions.delete_many({'admin_id':q.from_user.id,'kind':'shortener'})
+   await self.db.admin_sessions.insert_one({'admin_id':q.from_user.id,'kind':'shortener','step':'name','data':{},'created_at':now()})
+   return await q.message.reply_text('🔗 <b>ᴀᴅᴅ sʜᴏʀᴛᴇɴᴇʀ</b>\n\nSend the <b>shortener name</b>.')
+  if section=='shorteners' and action=='delete' and len(p)>2:
+   try: await self.db.shorteners.delete_one({'_id':ObjectId(p[2])})
+   except Exception: pass
+   return await q.answer('Shortener removed.')
+  if section=='shorteners':
+   items=await self.db.shorteners.find({}).sort('created_at',-1).to_list(None); rows=[]; text='🔗 <b>sʜᴏʀᴛᴇɴᴇʀs</b>\n\n'
+   for item in items:
+    text+=f'• <b>{item["name"]}</b> — {item.get("reward_tokens",0)} tokens / {item.get("cooldown_hours",0)}h ({"enabled" if item.get("enabled") else "disabled"})\n'; rows.append([B('🗑 Remove '+item['name'][:24],f'admin:shorteners:delete:{item["_id"]}')])
+   if not items:text+='No shorteners configured yet.\n'
+   rows += [[B('➕ Add New','admin:shorteners:add')],[B('🏠 Admin Menu','admin:home')]]; return await self.edit(q,text,K(rows))
+  if section=='categories' and action=='add':
+   await self.db.admin_sessions.delete_many({'admin_id':q.from_user.id,'kind':'category'})
+   await self.db.admin_sessions.insert_one({'admin_id':q.from_user.id,'kind':'category','step':'name','data':{}})
+   return await q.message.reply_text('📂 <b>ᴀᴅᴅ ᴄᴀᴛᴇɢᴏʀʏ</b>\n\nSend the category name.')
+  if section=='categories' and action=='delete' and len(p)>2:
+   try:
+    oid=ObjectId(p[2]); used=await self.db.collections.count_documents({'category_id':str(oid),'active':True})
+    if used:return await q.answer('Cannot remove: active collections use this category.',show_alert=True)
+    await self.db.categories.delete_one({'_id':oid})
+   except Exception:return await q.answer('Invalid category.',show_alert=True)
+   return await q.answer('Category removed.')
+  if section=='categories':
+   items=await self.db.categories.find({}).sort('name',1).to_list(None); rows=[]; text='📂 <b>ᴄᴀᴛᴇɢᴏʀɪᴇs</b>\n\n'
+   for item in items:
+    count=await self.db.collections.count_documents({'category_id':str(item['_id'])}); text+=f'• <b>{item["name"]}</b> — {count} collections\n'; rows.append([B('🗑 Remove '+item['name'][:24],f'admin:categories:delete:{item["_id"]}')])
+   if not items:text+='No categories yet.\n'
+   rows += [[B('➕ Add Category','admin:categories:add')],[B('🏠 Admin Menu','admin:home')]]; return await self.edit(q,text,K(rows))
+  if section=='set' and action:
+   await self.db.admin_sessions.delete_many({'admin_id':q.from_user.id,'kind':'setting'})
+   await self.db.admin_sessions.insert_one({'admin_id':q.from_user.id,'kind':'setting','key':action})
+   return await q.message.reply_text(f'⚙️ Send a new value for <b>{action}</b>.')
+  if section in ('economy','rewards','settings','system'):
+   values=await self.settings.get(); keys={'economy':['daily_free_limit','default_collection_price'],'rewards':['checkin_base_reward','checkin_streak_bonus','referral_reward'],'settings':['cleanup_enabled','cleanup_after_minutes'],'system':['maintenance_mode']}[section]
+   rows=[[B(f'{key}: {values.get(key)}',f'admin:set:{key}')] for key in keys]; rows.append([B('🏠 Admin Menu','admin:home')])
+   return await self.edit(q,f'⚙️ <b>{section.upper()}</b>\n\nTap a value to update it.',K(rows))
+  if section=='collections': return await self.edit(q,'🗂 <b>ᴄᴏʟʟᴇᴄᴛɪᴏɴs</b>\n\nTap Add Collection, then choose a category by its <b>name</b> when prompted.',K([[B('➕ Add Collection','admin:flow:newcollection')],[B('🏠 Admin Menu','admin:home')]]))
   if section=='stats':
-   users=await self.db.users.count_documents({});ban=await self.db.users.count_documents({'is_banned':True});cols=await self.db.collections.count_documents({});unlocks=await self.db.unlocked_collections.count_documents({});
-   return await self.edit(q,f'📊 <b>STATISTICS</b>\n👥 Total Users: {users}\n🚫 Banned Users: {ban}\n📦 Total Collections: {cols}\n📂 Total Categories: {await self.db.categories.count_documents({})}\n🔓 Total Unlocks: {unlocks}',K([[B('🏠 Admin Menu','admin:home')]]))
-  if section in ('economy','rewards','settings','system','users','broadcast'):return await self.edit(q,f'⚙️ <b>{section.upper()}</b>\nUse /set setting value (daily_free_limit, referral_reward, checkin_base_reward, cleanup_enabled, cleanup_after_minutes, maintenance_mode).\nUser moderation: /ban ID reason, /unban ID, /tokens ID +/-amount.\nBroadcast: reply to content with /broadcast.',K([[B('🏠 Admin Menu','admin:home')]]))
-  if section=='home':return await self.edit(q,'🛠 <b>ADMIN PANEL</b>',admin_kb())
-  if section=='flow': await q.message.reply_text('Send the requested command in chat.');return
+   users=await self.db.users.count_documents({}); cols=await self.db.collections.count_documents({}); return await self.edit(q,f'📊 <b>sᴛᴀᴛɪsᴛɪᴄs</b>\n\n👥 Users: {users}\n📦 Collections: {cols}\n🔓 Unlocks: {await self.db.unlocked_collections.count_documents({})}',K([[B('🏠 Admin Menu','admin:home')]]))
+  if section=='users': return await self.edit(q,'👥 <b>ᴜsᴇʀs</b>\n\nUse the user-management controls to search and moderate accounts.',K([[B('🏠 Admin Menu','admin:home')]]))
+  if section=='broadcast': return await self.edit(q,'📢 <b>ʙʀᴏᴀᴅᴄᴀsᴛ</b>\n\nSend the message you want to broadcast, then confirm it in the broadcast workflow.',K([[B('🏠 Admin Menu','admin:home')]]))
+  if section=='flow':
+   await self.db.admin_sessions.delete_many({'admin_id':q.from_user.id,'kind':'collection'})
+   await self.db.admin_sessions.insert_one({'admin_id':q.from_user.id,'kind':'collection','stage':'title','media':[],'created_at':now()})
+   return await q.message.reply_text('🗂 <b>ᴀᴅᴅ ᴄᴏʟʟᴇᴄᴛɪᴏɴ</b>\n\nSend the collection <b>title</b>.')
  async def input(self,m):
   # Guided collection uploads are persisted, so bot restarts do not lose admin state.
   if not self.admin_ok(m.from_user.id):return
@@ -133,6 +178,43 @@ class AppService:
    except Exception: return await m.reply_text('❌ Could not archive media to the Storage Channel. Use Admin → Storage Status/Test, then retry.')
    await self.db.admin_sessions.update_one({'_id':session['_id']},{'$push':{'media':media}});return await m.reply_text('Media stored permanently. Send more or /finishcollection.')
   text=m.text or ''; parts=text.split(maxsplit=2)
+  if session and text and not text.startswith('/') and session.get('stage') in ('title','category','price','description'):
+   stage=session['stage']
+   if stage=='title':
+    await self.db.admin_sessions.update_one({'_id':session['_id']},{'$set':{'title':text.strip(),'stage':'category'}}); return await m.reply_text('Send the <b>category name</b>.')
+   if stage=='category':
+    category=await self.db.categories.find_one({'name':text.strip(),'active':True})
+    if not category:return await m.reply_text('❌ Category not found. Send its exact name or create it first in Admin → Categories.')
+    await self.db.admin_sessions.update_one({'_id':session['_id']},{'$set':{'category_id':str(category['_id']),'stage':'price'}}); return await m.reply_text('Send the collection <b>token price</b>.')
+   if stage=='price':
+    try: price=int(text.strip())
+    except ValueError:return await m.reply_text('❌ Send a whole-number token price.')
+    if price<0:return await m.reply_text('❌ Price cannot be negative.')
+    await self.db.admin_sessions.update_one({'_id':session['_id']},{'$set':{'price':price,'stage':'description'}}); return await m.reply_text('Send an optional <b>description</b>, or send <code>-</code> to skip.')
+   description='' if text.strip()=='-' else text.strip()
+   await self.db.admin_sessions.update_one({'_id':session['_id']},{'$set':{'description':description,'stage':'cover'}}); return await m.reply_text('Send the collection <b>cover image</b>.')
+  flow=await self.db.admin_sessions.find_one({'admin_id':m.from_user.id,'kind':{'$in':['shortener','category','setting']}})
+  if flow and text and not text.startswith('/'):
+   if flow['kind']=='category':
+    await self.db.categories.insert_one({'name':text.strip(),'description':'','active':True,'created_at':now()}); await self.db.admin_sessions.delete_one({'_id':flow['_id']}); return await m.reply_text(f'✅ Category <b>{text.strip()}</b> created.')
+   if flow['kind']=='setting':
+    value={'true':True,'false':False}.get(text.strip().lower(),text.strip())
+    try:value=int(value)
+    except (TypeError,ValueError):pass
+    await self.settings.set(flow['key'],value); await self.db.admin_sessions.delete_one({'_id':flow['_id']}); return await m.reply_text(f'✅ <b>{flow["key"]}</b> is now <b>{value}</b>.')
+   data=flow.get('data',{}); step=flow['step']; order=['name','api_url','api_key','domain','alias_enabled','reward_tokens','cooldown_hours','alias_prefix']
+   if step=='alias_enabled' and text.strip().lower() not in ('true','false'): return await m.reply_text('Please send exactly <b>true</b> or <b>false</b>.')
+   if step in ('reward_tokens','cooldown_hours'):
+    try:int(text.strip())
+    except ValueError:return await m.reply_text('Please send a whole number.')
+   data[step]=text.strip(); index=order.index(step)
+   if step=='alias_enabled' and text.strip().lower()=='false': index=order.index('alias_prefix')
+   if index==len(order)-1:
+    doc={'name':data['name'],'api_url':data['api_url'],'api_key':data['api_key'],'domain':data['domain'],'enabled':True,'reward_tokens':int(data['reward_tokens']),'cooldown_hours':int(data['cooldown_hours']),'alias_enabled':data['alias_enabled'].lower()=='true','alias_prefix':data.get('alias_prefix',''),'created_at':now()}
+    await self.db.shorteners.insert_one(doc); await self.db.admin_sessions.delete_one({'_id':flow['_id']}); return await m.reply_text(f'✅ <b>Shortener ready</b>\n\nName: {doc["name"]}\nDomain: {doc["domain"]}\nReward: {doc["reward_tokens"]} Tokens\nCooldown: {doc["cooldown_hours"]} hours\nAlias: {doc["alias_enabled"]}\n\n<i>Demo destination:</i> https://t.me/{self.config.bot_username}?start=shortener_demo')
+   next_step=order[index+1]
+   prompts={'api_url':'Now send the <b>API URL</b>.','api_key':'Now send the <b>API key</b>.','domain':'Now send the <b>domain</b>.','alias_enabled':'Enable aliases? Send <b>true</b> or <b>false</b>.','reward_tokens':'Send the <b>reward tokens</b>.','cooldown_hours':'Send the <b>cooldown hours</b>.','alias_prefix':'Send the <b>alias prefix</b>.'}
+   await self.db.admin_sessions.update_one({'_id':flow['_id']},{'$set':{'step':next_step,'data':data}}); return await m.reply_text(prompts[next_step])
   if text == '/buttonstyles':
    from bot.utils.button_styles import test_keyboard
    keyboard, error = test_keyboard()
@@ -144,8 +226,9 @@ class AppService:
    if len(values)<3:return await m.reply_text('Usage: /newcollection Title | category_id | price | optional description')
    try: price=int(values[2])
    except ValueError:return await m.reply_text('Price must be a non-negative integer.')
-   cat=await self.db.categories.find_one({'_id':ObjectId(values[1]),'active':True}) if len(values[1])==24 else None
-   if not cat:return await m.reply_text('Use a valid active category ObjectId from /listcategories.')
+   cat=await self.db.categories.find_one({'name':values[1],'active':True})
+   if not cat:return await m.reply_text('❌ Category not found. Open Admin → Categories and use the exact category name.')
+   values[1]=str(cat['_id'])
    await self.db.admin_sessions.delete_many({'admin_id':m.from_user.id,'kind':'collection'})
    await self.db.admin_sessions.insert_one({'admin_id':m.from_user.id,'kind':'collection','stage':'cover','title':values[0],'category_id':values[1],'price':price,'description':values[3] if len(values)>3 else '','media':[],'created_at':now()});return await m.reply_text('Send collection cover image.')
   if text=='/finishcollection' and session:
