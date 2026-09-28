@@ -135,11 +135,12 @@ class AppService:
    return await q.message.reply_text('📂 <b>ᴀᴅᴅ ᴄᴀᴛᴇɢᴏʀʏ</b>\n\nSend the category name.')
   if section=='categories' and action=='delete' and len(p)>2:
    try:
-    oid=ObjectId(p[2]); used=await self.db.collections.count_documents({'category_id':str(oid),'active':True})
-    if used:return await q.answer('Cannot remove: active collections use this category.',show_alert=True)
+    oid=ObjectId(p[2])
+    # Detach collections so demo categories can be removed without orphaned UI state.
+    await self.db.collections.update_many({'category_id':str(oid)},{'$set':{'category_id':None,'updated_at':now()}})
     await self.db.categories.delete_one({'_id':oid})
    except Exception:return await q.answer('Invalid category.',show_alert=True)
-   return await q.answer('Category removed.')
+   return await q.answer('Category removed; dependent collections are now Uncategorized.')
   if section=='categories':
    items=await self.db.categories.find({}).sort('name',1).to_list(None); rows=[]; text='📂 <b>ᴄᴀᴛᴇɢᴏʀɪᴇs</b>\n\n'
    for item in items:
@@ -154,7 +155,18 @@ class AppService:
    values=await self.settings.get(); keys={'economy':['daily_free_limit','default_collection_price'],'rewards':['checkin_base_reward','checkin_streak_bonus','referral_reward'],'settings':['cleanup_enabled','cleanup_after_minutes'],'system':['maintenance_mode']}[section]
    rows=[[B(f'{key}: {values.get(key)}',f'admin:set:{key}')] for key in keys]; rows.append([B('🏠 Admin Menu','admin:home')])
    return await self.edit(q,f'⚙️ <b>{section.upper()}</b>\n\nTap a value to update it.',K(rows))
-  if section=='collections': return await self.edit(q,'🗂 <b>ᴄᴏʟʟᴇᴄᴛɪᴏɴs</b>\n\nTap Add Collection, then choose a category by its <b>name</b> when prompted.',K([[B('➕ Add Collection','admin:flow:newcollection')],[B('🏠 Admin Menu','admin:home')]]))
+  if section=='collections' and action=='delete' and len(p)>2:
+   try:
+    oid=ObjectId(p[2]); await self.db.collection_media.delete_many({'collection_id':oid}); await self.db.collections.delete_one({'_id':oid})
+   except Exception:return await q.answer('Invalid collection.',show_alert=True)
+   return await q.answer('Collection deleted.')
+  if section=='collections':
+   items=await self.db.collections.find({}).sort('created_at',-1).to_list(None); rows=[]; text='🗂 <b>ᴄᴏʟʟᴇᴄᴛɪᴏɴs</b>\n\n'
+   for item in items:
+    text+=f'• <b>{item["title"]}</b> — {item.get("media_count",0)} files\n'; rows.append([B('🗑 Delete '+item['title'][:24],f'admin:collections:delete:{item["_id"]}')])
+   if not items:text+='No collections yet.\n'
+   rows += [[B('➕ Add Collection','admin:flow:newcollection')],[B('🏠 Admin Menu','admin:home')]]
+   return await self.edit(q,text,K(rows))
   if section=='stats':
    users=await self.db.users.count_documents({}); cols=await self.db.collections.count_documents({}); return await self.edit(q,f'📊 <b>sᴛᴀᴛɪsᴛɪᴄs</b>\n\n👥 Users: {users}\n📦 Collections: {cols}\n🔓 Unlocks: {await self.db.unlocked_collections.count_documents({})}',K([[B('🏠 Admin Menu','admin:home')]]))
   if section=='users': return await self.edit(q,'👥 <b>ᴜsᴇʀs</b>\n\nUse the user-management controls to search and moderate accounts.',K([[B('🏠 Admin Menu','admin:home')]]))

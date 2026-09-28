@@ -1,22 +1,37 @@
-import aiohttp, secrets
+import aiohttp, secrets, re
 from datetime import timedelta
 from bot.utils.time import now, seconds_human
+
 class ShortenerService:
  def __init__(self,db,config,tokens):self.db,self.config,self.tokens=db,config,tokens
+ @staticmethod
+ def _url_from_response(payload, text):
+  """Accept common JSON keys or a plain-text short URL without exposing secrets."""
+  if isinstance(payload,dict):
+   for key in ('shortenedUrl','shortened_url','shortened url','shorturl','url'):
+    value=payload.get(key)
+    if isinstance(value,str) and value.startswith(('https://','http://')): return value
+  match=re.search(r'https?://[^\s"\\]+',text.replace('\\/','/'))
+  return match.group(0) if match else None
  async def create(self,user_id,shortener,settings):
   latest=await self.db.shortener_tasks.find_one({'user_id':user_id,'shortener_id':shortener['_id'],'completed_at':{'$exists':True}},sort=[('completed_at',-1)])
   if latest:
    remain=(latest['completed_at']+timedelta(hours=shortener['cooldown_hours'])-now()).total_seconds()
    if remain>0:return None, f'⏳ This task is available again after {seconds_human(remain)}.'
   token=secrets.token_urlsafe(18); destination=f'https://t.me/{self.config.bot_username}?start=task_{token}'
-  params={'api':shortener['api_key'],'url':destination}
+  # `format=text` works with common shortener APIs while ignored safely by JSON-only providers.
+  params={'api':shortener['api_key'],'url':destination,'format':'text'}
   if shortener.get('alias_enabled'):params['alias']=f"{shortener.get('alias_prefix','')}{secrets.token_hex(4)}"
   try:
    timeout=aiohttp.ClientTimeout(total=self.config.shortener_timeout)
    async with aiohttp.ClientSession(timeout=timeout) as s:
     async with s.get(shortener['api_url'],params=params) as r:
-     data=await r.json(content_type=None); url=data.get('shortenedUrl') or data.get('shortened_url') or data.get('url')
-     if not url: raise ValueError('response has no URL')
+     raw=await r.text()
+     if r.status >= 400: raise ValueError(f'HTTP {r.status}')
+     try: payload=await r.json(content_type=None)
+     except Exception: payload=None
+     url=self._url_from_response(payload,raw)
+     if not url: raise ValueError('response has no short URL')
   except Exception:return None,'❌ The sponsor task is temporarily unavailable. Please try another task.'
   doc={'token':token,'user_id':user_id,'shortener_id':shortener['_id'],'created_at':now(),'expires_at':now()+timedelta(hours=1),'min_verify_at':now()+timedelta(seconds=settings['shortener_min_seconds']),'url':url}
   await self.db.shortener_tasks.insert_one(doc);return doc,None
