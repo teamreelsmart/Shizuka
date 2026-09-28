@@ -17,7 +17,7 @@ from bot.handlers.common import register_common
 async def run():
  load_dotenv(); logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO'),format='%(asctime)s %(levelname)s %(name)s: %(message)s')
  config=Config.from_env(); mongo=Mongo(config.mongo_uri,config.database_name);await mongo.connect()
- app=Client('shizuka_bot',bot_token=config.bot_token,in_memory=True)
+ app=Client('shizuka_bot', api_id=config.api_id, api_hash=config.api_hash, bot_token=config.bot_token, in_memory=True)
  tokens=TokenService(mongo.db);settings=SettingsService(mongo.db,config)
  service=AppService(app,mongo.db,config,UserService(mongo.db),CollectionService(mongo.db,tokens),tokens,RewardService(mongo.db,tokens),ShortenerService(mongo.db,config,tokens),MediaService(mongo.db,config.storage_channel_id),settings,StorageService(config.storage_channel_id))
  register_common(app,service);await app.start(); logging.info('Bot started')

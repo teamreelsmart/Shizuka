@@ -12,11 +12,12 @@ Production-oriented asynchronous Pyrofork/MongoDB bot for gated media collection
 
 ## Required environment
 
-Copy `.env.example` to `.env` and set:
+Copy `.env.example` to `.env` and set. Create the required Telegram application credentials at https://my.telegram.org/apps:
 
 | Variable | Purpose |
 |---|---|
 | `BOT_TOKEN` | Token from BotFather |
+| `API_ID` / `API_HASH` | Telegram application credentials from https://my.telegram.org/apps; required by Pyrofork even for bot authorization |
 | `MONGO_URI` | MongoDB Atlas/self-hosted URI |
 | `DATABASE_NAME` | Mongo database name |
 | `ADMIN_IDS` | Comma-separated Telegram numeric IDs |
