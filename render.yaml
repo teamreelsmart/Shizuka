@@ -1,0 +1,6 @@
+services:
+  - type: worker
+    name: shizuka-media-bot
+    env: docker
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true

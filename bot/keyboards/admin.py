@@ -1,0 +1,2 @@
+from pyrogram.types import InlineKeyboardButton as B, InlineKeyboardMarkup as K
+def main():return K([[B('🗂 Collections','admin:collections'),B('📂 Categories','admin:categories')],[B('👛 Token Economy','admin:economy'),B('🔗 Shorteners','admin:shorteners')],[B('👥 Users','admin:users'),B('🎁 Rewards','admin:rewards')],[B('📊 Statistics','admin:stats'),B('📢 Broadcast','admin:broadcast')],[B('⚙️ Settings','admin:settings'),B('🛠 System','admin:system')],[B('📦 Storage Status/Test','admin:storage')],[B('🏠 Main Menu','menu:home')]])

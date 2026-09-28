@@ -1,0 +1,10 @@
+aiohttp>=3.9,<4
+dnspython>=2.4
+pyrofork==2.3.50
+humanize>=4.9
+psutil>=5.9
+motor>=3.3
+markdown>=3.5
+TgCrypto>=1.2
+requests>=2.31
+python-dotenv>=1.0
