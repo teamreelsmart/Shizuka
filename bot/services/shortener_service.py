@@ -29,7 +29,7 @@ class ShortenerService:
   """Correct the Arolinks documentation URL commonly pasted into API settings."""
   endpoint=shortener['api_url']
   parts=urlsplit(endpoint)
-  if parts.hostname and parts.hostname.lower() in ('arolinks.com','www.arolinks.com') and parts.path.rstrip('/').lower().startswith('/member/tools/api'):
+  if parts.hostname and parts.hostname.lower() in ('arolinks.com','www.arolinks.com') and parts.path.rstrip('/').lower() in ('/api','/member/tools/api'):
    return urlunsplit((parts.scheme or 'https',parts.netloc,'/api','',''))
   return endpoint
  @staticmethod
@@ -40,16 +40,22 @@ class ShortenerService:
    value=payload.get(key)
    if isinstance(value,str): return value.replace('\n',' ')[:180]
   return None
+ @staticmethod
+ def _request_params(api_key,destination,alias=None):
+  """Arolinks returns JSON by default; `format=text` is its only format option."""
+  params={'api':api_key,'url':destination}
+  if alias:params['alias']=alias
+  return params
  async def create(self,user_id,shortener,settings):
   latest=await self.db.shortener_tasks.find_one({'user_id':user_id,'shortener_id':shortener['_id'],'completed_at':{'$exists':True}},sort=[('completed_at',-1)])
   if latest:
    remain=(latest['completed_at']+timedelta(hours=shortener['cooldown_hours'])-now()).total_seconds()
    if remain>0:return None, f'⏳ This task is available again after {seconds_human(remain)}.', None
   token=secrets.token_urlsafe(18); destination=f'https://t.me/{self.config.bot_username}?start=task_{token}'
-  # Request JSON explicitly.  Most providers ignore this parameter when they only
-  # support text responses, which is still handled below as a fallback.
-  params={'api':shortener['api_key'],'url':destination,'format':'json'}
-  if shortener.get('alias_enabled'):params['alias']=f"{shortener.get('alias_prefix','')}{secrets.token_hex(4)}"
+  # Arolinks returns JSON when no format is specified. `format=json` is not part
+  # of its documented API; only `format=text` is an optional override.
+  alias=f"{shortener.get('alias_prefix','')}{secrets.token_hex(4)}" if shortener.get('alias_enabled') else None
+  params=self._request_params(shortener['api_key'],destination,alias)
   try:
    timeout=aiohttp.ClientTimeout(total=self.config.shortener_timeout)
    async with aiohttp.ClientSession(timeout=timeout) as s:

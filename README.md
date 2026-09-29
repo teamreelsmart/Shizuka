@@ -44,7 +44,7 @@ The bot verifies MongoDB at startup and creates its indexes once. It runs as lon
 1. Add your numeric ID to `ADMIN_IDS`, restart, then open `/admin`.
 2. Create a category with `/newcategory Name | Optional description`.
 3. Add the bot as an administrator with permission to post in the private storage channel, set `STORAGE_CHANNEL_ID`, then use **Storage Status/Test** in `/admin` to verify it. Start an upload with `/newcollection Title | category_id | price | optional description`; every cover and uploaded media message is copied into the storage channel before the collection is published.
-4. Open **Shorteners** and configure records with `name`, `api_url`, `api_key`, `domain`, `enabled`, `reward_tokens`, `cooldown_hours`, `alias_enabled`, and `alias_prefix`. Keys are masked in UI. For Arolinks, use the API endpoint `https://arolinks.com/api` (not the member/developer documentation page).
+4. Open **Shorteners** and configure records with `name`, `api_url`, `api_key`, `domain`, `enabled`, `reward_tokens`, `cooldown_hours`, `alias_enabled`, and `alias_prefix`. Keys are masked in UI. For Arolinks, set `api_url` to `https://arolinks.com/api` (not the member/developer documentation page), paste only the API token into `api_key`, and leave `alias_enabled` off unless you need custom aliases. The bot leaves out `format` so Arolinks returns its documented default JSON response.
 5. Adjust economy values via `/set daily_free_limit 10`, `/set referral_reward 5`, `/set checkin_base_reward 2`, `/set checkin_streak_bonus 1`, `/set cleanup_enabled true`, `/set cleanup_after_minutes 10`, or `/set maintenance_mode true`.
 
 Admins can temporarily test optional Pyrofork button styling with `/buttonstyles`; this does not alter any production keyboard.
