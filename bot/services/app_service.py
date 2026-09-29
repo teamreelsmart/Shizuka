@@ -51,7 +51,7 @@ class AppService:
   await m.reply_text(await self.welcome(user),reply_markup=kb.menu())
  async def welcome(self,u):
   unlocked=await self.db.unlocked_collections.count_documents({'user_id':u['telegram_id']});saved=await self.db.saved_collections.count_documents({'user_id':u['telegram_id']})
-  return f'🎀 Welcome, {u["first_name"]}!\n\n👛 Token Balance: {u["balance"]}\n📦 Unlocked Collections: {unlocked}\n🔖 Saved Collections: {saved}'
+  return f'🎀 <b>Welcome, {u["first_name"]}!</b>\n<blockquote><i>Your personal media lounge is ready.</i></blockquote>\n👛 <b>Token Balance:</b> <code>{u["balance"]}</code>\n📦 <b>Unlocked Collections:</b> {unlocked}\n🔖 <b>Saved Collections:</b> {saved}'
  async def checkin(self,m):
   u,blocked=await self.guarded(m.from_user)
   if blocked:return
@@ -114,7 +114,7 @@ class AppService:
   if state=='insufficient':return await self.edit(q,f'❌ <b>Insufficient Balance</b>\n\nRequired: {c["price"]} Tokens\nYour balance: {u["balance"]} Tokens',K([[B('💰 Earn Tokens','menu:earn')],[B('🏠 Main Menu','menu:home')]]))
   if state in ('unlocked','already'):
    await q.answer('Already unlocked — sending again.' if state=='already' else 'Unlocked! Sending media.')
-   s=await self.settings.get(); count=await self.media.deliver(self.app,u['telegram_id'],c,s['cleanup_after_minutes'],s['cleanup_enabled'])
+   s=await self.settings.get(); count=await self.media.deliver(self.app,u['telegram_id'],c,s['cleanup_after_minutes'],s['cleanup_enabled'],s.get('protected_content',False))
    if not count:await q.message.reply_text('⚠️ This collection has no deliverable media. Please contact an admin.')
  async def task(self,q,u,sid):
   try:s=await self.db.shorteners.find_one({'_id':ObjectId(sid),'enabled':True})
@@ -129,7 +129,7 @@ class AppService:
    if error.startswith('❌'):
     await self.notify_admins('shortener API request',RuntimeError(error_detail or error),user_id=u['telegram_id'],provider=s.get('name'),shortener_id=sid)
    return await q.answer(error,show_alert=True)
-  await q.message.reply_text(f'👀 <b>{s["name"]}</b>\n\nTap the button below to open the sponsor task. Complete it, then return to the bot after approximately 3 minutes.\n\nReward: {s["reward_tokens"]} Tokens.',reply_markup=K([[B('🔗 Open Sponsor Task',url=task['url'])]]))
+  await q.message.reply_text(f'📋 <b>Task: {s["name"]}</b>\n\n🎁 <b>Reward:</b> <u>+{s["reward_tokens"]} Tokens</u>\n\n<b>3 Quick Steps:</b>\n1. Tap <b>Open Verification Link</b> below\n2. Complete the quick <i>30-sec sponsor verification</i>\n3. Tap <b>Start</b> when returned to Telegram to claim your tokens!\n\n<blockquote><i>Link is valid for 30 minutes. Available once every {s["cooldown_hours"]} hours.</i></blockquote>',reply_markup=K([[B('🔗 Open Verification Link',url=task['url'])]]))
  async def vault(self,q,u,kind,page):
   source='unlocked_collections' if kind=='unlocked' else 'saved_collections'; total=await self.db[source].count_documents({'user_id':u['telegram_id']});page,pages,size=page_data(total,page);items=await self.db[source].find({'user_id':u['telegram_id']}).sort('unlocked_at' if kind=='unlocked' else 'saved_at',-1).skip(page*size).limit(size).to_list(size);rows=[];text=f'📦 <b>YOUR {kind.upper()} COLLECTIONS</b>\n\n'
   for i,x in enumerate(items,page*size+1):
@@ -193,7 +193,7 @@ class AppService:
    await self.db.admin_sessions.insert_one({'admin_id':q.from_user.id,'kind':'setting','key':action})
    return await q.message.reply_text(f'⚙️ Send a new value for <b>{action}</b>.')
   if section in ('economy','rewards','settings','system'):
-   values=await self.settings.get(); keys={'economy':['daily_free_limit','default_collection_price'],'rewards':['checkin_base_reward','checkin_streak_bonus','referral_reward'],'settings':['cleanup_enabled','cleanup_after_minutes'],'system':['maintenance_mode']}[section]
+   values=await self.settings.get(); keys={'economy':['daily_free_limit','default_collection_price'],'rewards':['checkin_base_reward','checkin_streak_bonus','referral_reward'],'settings':['cleanup_enabled','cleanup_after_minutes','protected_content'],'system':['maintenance_mode']}[section]
    rows=[[B(f'{key}: {values.get(key)}',f'admin:set:{key}')] for key in keys]; rows.append([B('🏠 Admin Menu','admin:home')])
    return await self.edit(q,f'⚙️ <b>{section.upper()}</b>\n\nTap a value to update it.',K(rows))
   if section=='collections' and action=='delete' and len(p)>2:
@@ -290,6 +290,19 @@ class AppService:
    values[1]=str(cat['_id'])
    await self.db.admin_sessions.delete_many({'admin_id':m.from_user.id,'kind':'collection'})
    await self.db.admin_sessions.insert_one({'admin_id':m.from_user.id,'kind':'collection','stage':'cover','title':values[0],'category_id':values[1],'price':price,'description':values[3] if len(values)>3 else '','media':[],'created_at':now()});return await m.reply_text('Send collection cover image.')
+  if text.startswith('/newbatchcollection '):
+   values=[x.strip() for x in text[len('/newbatchcollection '):].split('|')]
+   if len(values)<5:return await m.reply_text('❌ <b>Usage</b>\n<blockquote>/newbatchcollection Title | Category name | Price | First storage message ID | Last storage message ID | Optional description</blockquote>')
+   try: price,first_id,last_id=int(values[2]),int(values[3]),int(values[4])
+   except ValueError:return await m.reply_text('❌ <b>Invalid input</b>\n<i>Price and both message IDs must be whole numbers.</i>')
+   category=await self.db.categories.find_one({'name':values[1],'active':True})
+   if not category:return await m.reply_text('❌ <b>Category not found</b>\n<i>Use the exact active category name.</i>')
+   try: media=await self.storage.batch(self.app,first_id,last_id)
+   except Exception as exc:return await m.reply_text(f'❌ <b>Storage batch failed</b>\n<i>{str(exc)}</i>')
+   c={'title':values[0],'description':values[5] if len(values)>5 else '','category_id':str(category['_id']),'cover_file_id':media[0]['file_id'],'cover_storage_message_id':media[0]['storage_message_id'],'price':price,'views':0,'unlock_count':0,'media_count':len(media),'active':True,'created_at':now(),'updated_at':now()}
+   result=await self.db.collections.insert_one(c)
+   await self.db.collection_media.insert_many([{'collection_id':result.inserted_id,**item,'order':index} for index,item in enumerate(media)])
+   return await m.reply_text(f'✅ <b>Batch collection published</b>\n<blockquote>{c["title"]}: {len(media)} storage files imported.</blockquote>')
   if text=='/finishcollection' and session:
    if session.get('stage')!='media' or not session.get('media'):return await m.reply_text('Send a cover and at least one photo/video first.')
    c={'title':session['title'],'description':session['description'],'category_id':session['category_id'],'cover_file_id':session['cover']['file_id'],'cover_storage_message_id':session['cover']['storage_message_id'],'price':session['price'],'views':0,'unlock_count':0,'media_count':len(session['media']),'active':True,'created_at':now(),'updated_at':now()}; result=await self.db.collections.insert_one(c)

@@ -1,5 +1,5 @@
 from copy import deepcopy
-DEFAULTS={'daily_free_limit':10,'default_collection_price':5,'checkin_base_reward':2,'checkin_streak_bonus':1,'referral_reward':5,'daily_shortener_earning_limit':50,'cleanup_enabled':True,'cleanup_after_minutes':10,'maintenance_mode':False,'shortener_min_seconds':180,'shortener_tolerance_seconds':30,'view_window_seconds':3600}
+DEFAULTS={'daily_free_limit':10,'default_collection_price':5,'checkin_base_reward':2,'checkin_streak_bonus':1,'referral_reward':5,'daily_shortener_earning_limit':50,'cleanup_enabled':True,'cleanup_after_minutes':10,'protected_content':False,'maintenance_mode':False,'shortener_min_seconds':30,'shortener_tolerance_seconds':10,'view_window_seconds':3600}
 class SettingsService:
  def __init__(self, db, config): self.db,self.config=db,config
  async def get(self):

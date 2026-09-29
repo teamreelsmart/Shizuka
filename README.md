@@ -53,6 +53,8 @@ Admin user tools: `/ban ID reason`, `/unban ID`, `/tokens ID +/-amount`. Each ba
 
 Use **Admin → Admins → Add Admin** to grant an additional numeric Telegram ID access to `/admin`; these added administrators are stored in MongoDB and survive restarts. Use `/cancel` to clear your active admin workflow, or `/restart` to restart the bot process.
 
+For a collection already uploaded to the storage channel, use `/newbatchcollection Title | Category name | Price | First storage message ID | Last storage message ID | Optional description`. The bot reads that inclusive media-ID range directly from the storage channel, so no files need to be sent to the bot again. Enable **Admin → Settings → protected_content** to prevent recipients from forwarding delivered media.
+
 ## Deploy Render
 
 Push this repository, create a **Background Worker**, select Docker, and configure all variables from `.env.example` in Render’s Environment page. `render.yaml` defines the worker command. Do not use a web service: the bot is a long-running polling worker.

@@ -71,7 +71,7 @@ class ShortenerService:
    # Do not put API keys, generated task URLs, or response bodies in logs.
    log.exception('shortener request failed provider=%s endpoint=%s error=%s',shortener.get('name','unknown'),self._api_endpoint(shortener).split('?')[0],exc)
    return None,'❌ The sponsor task is temporarily unavailable. Please try another task.', f'{type(exc).__name__}: {exc}'
-  doc={'token':token,'user_id':user_id,'shortener_id':shortener['_id'],'created_at':now(),'expires_at':now()+timedelta(hours=1),'min_verify_at':now()+timedelta(seconds=settings['shortener_min_seconds']),'url':url}
+  doc={'token':token,'user_id':user_id,'shortener_id':shortener['_id'],'created_at':now(),'expires_at':now()+timedelta(minutes=30),'min_verify_at':now()+timedelta(seconds=settings['shortener_min_seconds']),'url':url}
   await self.db.shortener_tasks.insert_one(doc);return doc,None,None
  async def verify(self,user_id,token,settings):
   task=await self.db.shortener_tasks.find_one({'token':token,'user_id':user_id,'completed_at':{'$exists':False}})

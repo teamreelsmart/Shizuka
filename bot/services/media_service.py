@@ -6,7 +6,7 @@ from bot.utils.time import now
 
 class MediaService:
  def __init__(self,db,storage_channel_id):self.db,self.storage_channel_id=db,storage_channel_id
- async def deliver(self,app,user_id,collection,cleanup_minutes,cleanup_enabled):
+ async def deliver(self,app,user_id,collection,cleanup_minutes,cleanup_enabled,protected_content=False):
   media=await self.db.collection_media.find({'collection_id':collection['_id']}).sort('order',1).to_list(None); sent=[]
   for i in range(0,len(media),10):
    batch=media[i:i+10]
@@ -20,8 +20,8 @@ class MediaService:
     if not item: continue
     group.append(InputMediaPhoto(item.file_id,caption=record.get('caption')) if record['media_type']=='photo' else InputMediaVideo(item.file_id,caption=record.get('caption')))
    if not group: continue
-   try: msgs=await app.send_media_group(user_id,group)
-   except FloodWait as e: await asyncio.sleep(e.value);msgs=await app.send_media_group(user_id,group)
+   try: msgs=await app.send_media_group(user_id,group,protect_content=protected_content)
+   except FloodWait as e: await asyncio.sleep(e.value);msgs=await app.send_media_group(user_id,group,protect_content=protected_content)
    except Exception: continue
    sent.extend(msgs); await asyncio.sleep(.25)
   if cleanup_enabled and sent:
