@@ -1,5 +1,6 @@
 import aiohttp, logging, secrets, re
 from datetime import timedelta
+from urllib.parse import urlsplit, urlunsplit
 from bot.utils.time import now, seconds_human
 
 log = logging.getLogger(__name__)
@@ -23,6 +24,22 @@ class ShortenerService:
     if url:return url
   match=re.search(r'https?://[^\s"\\]+',text.replace('\\/','/'))
   return match.group(0) if match else None
+ @staticmethod
+ def _api_endpoint(shortener):
+  """Correct the Arolinks documentation URL commonly pasted into API settings."""
+  endpoint=shortener['api_url']
+  parts=urlsplit(endpoint)
+  if parts.hostname and parts.hostname.lower() in ('arolinks.com','www.arolinks.com') and parts.path.rstrip('/').lower().startswith('/member/tools/api'):
+   return urlunsplit((parts.scheme or 'https',parts.netloc,'/api','',''))
+  return endpoint
+ @staticmethod
+ def _error_from_response(payload):
+  """Return a short provider error for admin diagnostics, never the raw response."""
+  if not isinstance(payload,dict): return None
+  for key in ('message','error','errors','description'):
+   value=payload.get(key)
+   if isinstance(value,str): return value.replace('\n',' ')[:180]
+  return None
  async def create(self,user_id,shortener,settings):
   latest=await self.db.shortener_tasks.find_one({'user_id':user_id,'shortener_id':shortener['_id'],'completed_at':{'$exists':True}},sort=[('completed_at',-1)])
   if latest:
@@ -36,16 +53,17 @@ class ShortenerService:
   try:
    timeout=aiohttp.ClientTimeout(total=self.config.shortener_timeout)
    async with aiohttp.ClientSession(timeout=timeout) as s:
-    async with s.get(shortener['api_url'],params=params) as r:
+    endpoint=self._api_endpoint(shortener)
+    async with s.get(endpoint,params=params) as r:
      raw=await r.text()
      if r.status >= 400: raise ValueError(f'HTTP {r.status}')
      try: payload=await r.json(content_type=None)
      except Exception: payload=None
      url=self._url_from_response(payload,raw)
-     if not url: raise ValueError('response has no short URL')
+     if not url: raise ValueError(f'response has no short URL{": " + self._error_from_response(payload) if self._error_from_response(payload) else ""}')
   except Exception as exc:
    # Do not put API keys, generated task URLs, or response bodies in logs.
-   log.exception('shortener request failed provider=%s endpoint=%s error=%s',shortener.get('name','unknown'),shortener.get('api_url','').split('?')[0],exc)
+   log.exception('shortener request failed provider=%s endpoint=%s error=%s',shortener.get('name','unknown'),self._api_endpoint(shortener).split('?')[0],exc)
    return None,'❌ The sponsor task is temporarily unavailable. Please try another task.', f'{type(exc).__name__}: {exc}'
   doc={'token':token,'user_id':user_id,'shortener_id':shortener['_id'],'created_at':now(),'expires_at':now()+timedelta(hours=1),'min_verify_at':now()+timedelta(seconds=settings['shortener_min_seconds']),'url':url}
   await self.db.shortener_tasks.insert_one(doc);return doc,None,None
