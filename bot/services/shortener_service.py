@@ -1,26 +1,37 @@
-import aiohttp, secrets, re
+import aiohttp, logging, secrets, re
 from datetime import timedelta
 from bot.utils.time import now, seconds_human
+
+log = logging.getLogger(__name__)
 
 class ShortenerService:
  def __init__(self,db,config,tokens):self.db,self.config,self.tokens=db,config,tokens
  @staticmethod
  def _url_from_response(payload, text):
-  """Accept common JSON keys or a plain-text short URL without exposing secrets."""
+  """Extract a short URL from common (including nested) JSON API responses."""
+  keys=('shortenedUrl','shortened_url','shortened url','shorturl','short_url','url','link')
   if isinstance(payload,dict):
-   for key in ('shortenedUrl','shortened_url','shortened url','shorturl','url'):
+   for key in keys:
     value=payload.get(key)
     if isinstance(value,str) and value.startswith(('https://','http://')): return value
+   for value in payload.values():
+    url=ShortenerService._url_from_response(value,'')
+    if url:return url
+  elif isinstance(payload,list):
+   for value in payload:
+    url=ShortenerService._url_from_response(value,'')
+    if url:return url
   match=re.search(r'https?://[^\s"\\]+',text.replace('\\/','/'))
   return match.group(0) if match else None
  async def create(self,user_id,shortener,settings):
   latest=await self.db.shortener_tasks.find_one({'user_id':user_id,'shortener_id':shortener['_id'],'completed_at':{'$exists':True}},sort=[('completed_at',-1)])
   if latest:
    remain=(latest['completed_at']+timedelta(hours=shortener['cooldown_hours'])-now()).total_seconds()
-   if remain>0:return None, f'⏳ This task is available again after {seconds_human(remain)}.'
+   if remain>0:return None, f'⏳ This task is available again after {seconds_human(remain)}.', None
   token=secrets.token_urlsafe(18); destination=f'https://t.me/{self.config.bot_username}?start=task_{token}'
-  # `format=text` works with common shortener APIs while ignored safely by JSON-only providers.
-  params={'api':shortener['api_key'],'url':destination,'format':'text'}
+  # Request JSON explicitly.  Most providers ignore this parameter when they only
+  # support text responses, which is still handled below as a fallback.
+  params={'api':shortener['api_key'],'url':destination,'format':'json'}
   if shortener.get('alias_enabled'):params['alias']=f"{shortener.get('alias_prefix','')}{secrets.token_hex(4)}"
   try:
    timeout=aiohttp.ClientTimeout(total=self.config.shortener_timeout)
@@ -32,9 +43,12 @@ class ShortenerService:
      except Exception: payload=None
      url=self._url_from_response(payload,raw)
      if not url: raise ValueError('response has no short URL')
-  except Exception:return None,'❌ The sponsor task is temporarily unavailable. Please try another task.'
+  except Exception as exc:
+   # Do not put API keys, generated task URLs, or response bodies in logs.
+   log.exception('shortener request failed provider=%s endpoint=%s error=%s',shortener.get('name','unknown'),shortener.get('api_url','').split('?')[0],exc)
+   return None,'❌ The sponsor task is temporarily unavailable. Please try another task.', f'{type(exc).__name__}: {exc}'
   doc={'token':token,'user_id':user_id,'shortener_id':shortener['_id'],'created_at':now(),'expires_at':now()+timedelta(hours=1),'min_verify_at':now()+timedelta(seconds=settings['shortener_min_seconds']),'url':url}
-  await self.db.shortener_tasks.insert_one(doc);return doc,None
+  await self.db.shortener_tasks.insert_one(doc);return doc,None,None
  async def verify(self,user_id,token,settings):
   task=await self.db.shortener_tasks.find_one({'token':token,'user_id':user_id,'completed_at':{'$exists':False}})
   if not task:return 'expired',None

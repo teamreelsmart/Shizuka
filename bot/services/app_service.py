@@ -5,9 +5,20 @@ from bot.keyboards.admin import main as admin_kb
 from bot.utils.formatting import collection_text
 from bot.utils.pagination import page_data
 from bot.utils.time import now
+import logging
+
+log=logging.getLogger(__name__)
 class AppService:
  def __init__(self,app,db,config,users,collections,tokens,rewards,shorteners,media,settings,storage): self.app,self.db,self.config,self.users,self.collections,self.tokens,self.rewards,self.shorteners,self.media,self.settings,self.storage=app,db,config,users,collections,tokens,rewards,shorteners,media,settings,storage
  def admin_ok(self,id):return id in self.config.admin_ids
+ async def notify_admins(self,context,error,**details):
+  """Send a concise, secret-free operational error report to each admin."""
+  values='\n'.join(f'<b>{key}:</b> <code>{str(value)[:180]}</code>' for key,value in details.items() if value is not None)
+  message=f'⚠️ <b>Bot error</b>\n<b>Where:</b> <code>{context}</code>\n<b>Error:</b> <code>{type(error).__name__}: {str(error)[:300]}</code>'
+  if values:message+=f'\n{values}'
+  for admin_id in self.config.admin_ids:
+   try:await self.app.send_message(admin_id,message)
+   except Exception:log.exception('could not notify admin_id=%s about %s',admin_id,context)
  async def guarded(self,u):
   user=await self.users.ensure(u); s=await self.settings.get()
   return user, (user['is_banned'] or (s['maintenance_mode'] and not self.admin_ok(u.id)))
@@ -96,9 +107,16 @@ class AppService:
   try:s=await self.db.shorteners.find_one({'_id':ObjectId(sid),'enabled':True})
   except Exception:s=None
   if not s:return await q.answer('Task unavailable.',show_alert=True)
-  task,error=await self.shorteners.create(u['telegram_id'],s,await self.settings.get())
-  if error:return await q.answer(error,show_alert=True)
-  await q.message.reply_text(f'👀 <b>{s["name"]}</b>\n\nComplete the sponsor flow, then return using this link after approximately 3 minutes:\n{task["url"]}\n\nReward: {s["reward_tokens"]} Tokens.')
+  try:task,error,error_detail=await self.shorteners.create(u['telegram_id'],s,await self.settings.get())
+  except Exception as exc:
+   log.exception('task creation failed user_id=%s shortener_id=%s',u['telegram_id'],sid)
+   await self.notify_admins('shortener task creation',exc,user_id=u['telegram_id'],provider=s.get('name'),shortener_id=sid)
+   return await q.answer('❌ The sponsor task could not be created. The admin has been notified.',show_alert=True)
+  if error:
+   if error.startswith('❌'):
+    await self.notify_admins('shortener API request',RuntimeError(error_detail or error),user_id=u['telegram_id'],provider=s.get('name'),shortener_id=sid)
+   return await q.answer(error,show_alert=True)
+  await q.message.reply_text(f'👀 <b>{s["name"]}</b>\n\nTap the button below to open the sponsor task. Complete it, then return to the bot after approximately 3 minutes.\n\nReward: {s["reward_tokens"]} Tokens.',reply_markup=K([[B('🔗 Open Sponsor Task',url=task['url'])]]))
  async def vault(self,q,u,kind,page):
   source='unlocked_collections' if kind=='unlocked' else 'saved_collections'; total=await self.db[source].count_documents({'user_id':u['telegram_id']});page,pages,size=page_data(total,page);items=await self.db[source].find({'user_id':u['telegram_id']}).sort('unlocked_at' if kind=='unlocked' else 'saved_at',-1).skip(page*size).limit(size).to_list(size);rows=[];text=f'📦 <b>YOUR {kind.upper()} COLLECTIONS</b>\n\n'
   for i,x in enumerate(items,page*size+1):
