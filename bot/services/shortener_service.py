@@ -1,7 +1,7 @@
 import aiohttp, logging, secrets, re
 from datetime import timedelta
 from urllib.parse import urlsplit, urlunsplit
-from bot.utils.time import now, seconds_human
+from bot.utils.time import as_utc, now, seconds_human
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ class ShortenerService:
  async def create(self,user_id,shortener,settings):
   latest=await self.db.shortener_tasks.find_one({'user_id':user_id,'shortener_id':shortener['_id'],'completed_at':{'$exists':True}},sort=[('completed_at',-1)])
   if latest:
-   remain=(latest['completed_at']+timedelta(hours=shortener['cooldown_hours'])-now()).total_seconds()
+   remain=(as_utc(latest['completed_at'])+timedelta(hours=shortener['cooldown_hours'])-now()).total_seconds()
    if remain>0:return None, f'⏳ This task is available again after {seconds_human(remain)}.', None
   token=secrets.token_urlsafe(18); destination=f'https://t.me/{self.config.bot_username}?start=task_{token}'
   # Arolinks returns JSON when no format is specified. `format=json` is not part
@@ -76,7 +76,7 @@ class ShortenerService:
  async def verify(self,user_id,token,settings):
   task=await self.db.shortener_tasks.find_one({'token':token,'user_id':user_id,'completed_at':{'$exists':False}})
   if not task:return 'expired',None
-  if now()<task['min_verify_at']-timedelta(seconds=settings['shortener_tolerance_seconds']):
+  if now()<as_utc(task['min_verify_at'])-timedelta(seconds=settings['shortener_tolerance_seconds']):
    await self.db.suspicious_activity.insert_one({'user_id':user_id,'task_id':task['_id'],'shortener_id':task['shortener_id'],'reason':'verification_too_early','timestamp':now()})
    await self.db.users.update_one({'telegram_id':user_id},{'$set':{'is_banned':True,'ban_reason':'Suspicious shortener verification','banned_at':now()}});return 'banned',None
   s=await self.db.shorteners.find_one({'_id':task['shortener_id'],'enabled':True})

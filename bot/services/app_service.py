@@ -31,10 +31,20 @@ class AppService:
   user,blocked=await self.guarded(m.from_user)
   args=m.command[1] if len(m.command)>1 else ''
   if args.startswith('task_'):
-   state,reward=await self.shorteners.verify(m.from_user.id,args[5:],await self.settings.get())
-   await m.reply_text('🎉 Verification complete! +%s Tokens.'%reward if state=='ok' else ('🚫 Suspicious verification detected; your account was restricted.' if state=='banned' else '❌ This sponsor session is expired or unavailable.'));return
+   settings=await self.settings.get(); state,reward=await self.shorteners.verify(m.from_user.id,args[5:],settings)
+   if state=='ok':
+    updated=await self.db.users.find_one({'telegram_id':m.from_user.id})
+    earned=await self.tokens.earned_today(m.from_user.id)
+    limit=settings.get('daily_shortener_earning_limit',50)
+    await m.reply_text(f'🎉 <b>Reward Credited</b>\n\n💰 +{reward} Tokens added to your wallet.\n🪙 Balance: {updated["balance"]} tokens\n📊 Today\'s Earnings: {earned}/{limit} tokens\n\nEnjoy your media stream!')
+   else: await m.reply_text('🚫 Suspicious verification detected; your account was restricted.' if state=='banned' else '❌ This sponsor session is expired or unavailable.')
+   return
   if blocked: await m.reply_text('🚫 Your account is currently restricted.' if user['is_banned'] else '🛠 Bot is currently under maintenance.');return
-  if args.isdigit() and user.get('referred_by') is None: await self.rewards.referral(m.from_user.id,int(args),(await self.settings.get())['referral_reward'])
+  if args.isdigit() and user.get('referred_by') is None:
+   reward=(await self.settings.get())['referral_reward']; referrer_id=int(args)
+   if await self.rewards.referral(m.from_user.id,referrer_id,reward):
+    try:await self.app.send_message(referrer_id,f'🎉 <b>New Referral!</b>\n\nHey! {user["first_name"]} joined using your referral link.\n💰 +{reward} Tokens have been added to your wallet.')
+    except Exception:log.exception('could not notify referrer_id=%s',referrer_id)
   await m.reply_text(await self.welcome(user),reply_markup=kb.menu())
  async def welcome(self,u):
   unlocked=await self.db.unlocked_collections.count_documents({'user_id':u['telegram_id']});saved=await self.db.saved_collections.count_documents({'user_id':u['telegram_id']})
