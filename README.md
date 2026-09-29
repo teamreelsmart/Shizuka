@@ -53,7 +53,7 @@ Admin user tools: `/ban ID reason`, `/unban ID`, `/tokens ID +/-amount`. Each ba
 
 Use **Admin → Admins → Add Admin** to grant an additional numeric Telegram ID access to `/admin`; these added administrators are stored in MongoDB and survive restarts. Use `/cancel` to clear your active admin workflow, or `/restart` to restart the bot process.
 
-For a collection already uploaded to the storage channel, use `/newbatchcollection Title | Category name | Price | First storage message ID | Last storage message ID | Optional description`. The bot reads that inclusive media-ID range directly from the storage channel, so no files need to be sent to the bot again. Enable **Admin → Settings → protected_content** to prevent recipients from forwarding delivered media.
+When using the guided collection workflow, send the cover to the bot once, then send the first and last storage-channel message links (for example `https://t.me/c/3995725849/123`). The bot imports every photo/video in that inclusive range, so no collection files need to be sent to the bot again. You can also use `/newbatchcollection Title | Category name | Price | First storage message ID | Last storage message ID | Optional description`. Enable **Admin → Settings → protected_content** to prevent recipients from forwarding delivered media.
 
 ## Deploy Render
 

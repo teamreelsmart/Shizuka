@@ -1,4 +1,4 @@
-import asyncio, os, sys
+import asyncio, os, re, sys
 from bson import ObjectId
 from pyrogram.types import InlineKeyboardButton as B, InlineKeyboardMarkup as K
 from bot.keyboards import user as kb
@@ -55,7 +55,7 @@ class AppService:
  async def checkin(self,m):
   u,blocked=await self.guarded(m.from_user)
   if blocked:return
-  got=await self.rewards.checkin(u,await self.settings.get());await m.reply_text(f'🎁 Check-in claimed: +{got[0]} Tokens! Streak: {got[1]} day(s).' if got else '⏳ You have already claimed today.')
+  got=await self.rewards.checkin(u,await self.settings.get());await m.reply_text(f'🎁 <b>Check-in claimed!</b>\n<blockquote>💰 +{got[0]} Tokens\n🔥 <i>Streak: {got[1]} day(s)</i></blockquote>' if got else '⏳ <b>Already claimed today</b>\n<i>Come back tomorrow for your next reward.</i>')
  async def callback(self,q):
   u,blocked=await self.guarded(q.from_user)
   if blocked:await q.answer('Account unavailable.',show_alert=True);return
@@ -97,7 +97,7 @@ class AppService:
   if which=='refer':return await self.edit(q,f'👥 <b>REFER FRIENDS</b>\n\nShare your personal invite link:\nhttps://t.me/{self.config.bot_username}?start={u["telegram_id"]}\n\nEarn {(await self.settings.get())["referral_reward"]} Tokens for each new friend!',kb.back())
   if which=='start':
    s=await self.settings.get()
-   if not await self.users.daily_view(u['telegram_id'],s['daily_free_limit']):return await self.edit(q,'🎬 Your free daily limit has been reached. Unlock collections to receive all media.',K([[B('💰 Earn Tokens','menu:earn')],[B('📦 Browse Collections','menu:start'),B('🏠 Main Menu','menu:home')]]))
+   if not await self.users.daily_view(u['telegram_id'],s['daily_free_limit']):return await self.edit(q,'🎬 <b>Daily free limit reached</b>\n<blockquote><i>Earn tokens or unlock a collection to keep watching.</i></blockquote>',K([[B('💰 Earn Tokens','menu:earn')],[B('📦 Browse Collections','menu:start'),B('🏠 Main Menu','menu:home')]]))
    c=await self.collections.latest();return await self.show_collection(q,u,c) if c else await self.edit(q,'📭 No active collections are available yet.',kb.back())
  async def show_collection(self,q,u,c):
   s=await self.settings.get();await self.collections.viewed(u['telegram_id'],c,s['view_window_seconds']);cat=await self.db.categories.find_one({'_id':ObjectId(c['category_id'])}) if c.get('category_id') else None;saved=bool(await self.db.saved_collections.find_one({'user_id':u['telegram_id'],'collection_id':c['_id']}));text=collection_text(c,(cat or {}).get('name','Uncategorized')); markup=kb.card(str(c['_id']),saved)
@@ -220,17 +220,32 @@ class AppService:
   # Guided collection uploads are persisted, so bot restarts do not lose admin state.
   if not await self.admin_ok(m.from_user.id):return
   session=await self.db.admin_sessions.find_one({'admin_id':m.from_user.id,'kind':'collection'})
-  if session and (m.photo or m.video):
+  if session and (m.photo or m.video) and session.get('stage') in ('cover','media'):
    if session.get('stage')=='cover':
 
     try: cover=await self.storage.archive(self.app,m)
     except Exception: return await m.reply_text('❌ Could not archive cover to the Storage Channel. Use Admin → Storage Status/Test, then retry.')
-    await self.db.admin_sessions.update_one({'_id':session['_id']},{'$set':{'cover':cover,'stage':'media'}});return await m.reply_text('Cover stored permanently. Send photos/videos in order, then /finishcollection.')
+    await self.db.admin_sessions.update_one({'_id':session['_id']},{'$set':{'cover':cover,'stage':'batch_first'}});return await m.reply_text('✅ <b>Cover saved</b>\n<blockquote>Now send the <u>first message link</u> from the storage channel batch.</blockquote>\n<i>Example: https://t.me/c/3995725849/123</i>')
 
    try: media=await self.storage.archive(self.app,m)
    except Exception: return await m.reply_text('❌ Could not archive media to the Storage Channel. Use Admin → Storage Status/Test, then retry.')
    await self.db.admin_sessions.update_one({'_id':session['_id']},{'$push':{'media':media}});return await m.reply_text('Media stored permanently. Send more or /finishcollection.')
   text=m.text or ''; parts=text.split(maxsplit=2)
+  if session and text and not text.startswith('/') and session.get('stage') in ('batch_first','batch_last'):
+   match=re.fullmatch(r'https?://t\.me/(?:c/(\d+)|[A-Za-z0-9_]+)/([0-9]+)/?',text.strip())
+   if not match:return await m.reply_text('❌ <b>Invalid message link</b>\n<i>Send the full storage-channel message link, for example https://t.me/c/3995725849/123.</i>')
+   if match.group(1) and match.group(1) != str(self.config.storage_channel_id).removeprefix('-100'):return await m.reply_text('❌ <b>Wrong storage channel</b>\n<i>Send a link from this bot’s configured storage channel.</i>')
+   message_id=int(match.group(2))
+   if session['stage']=='batch_first':
+    await self.db.admin_sessions.update_one({'_id':session['_id']},{'$set':{'batch_first_message_id':message_id,'stage':'batch_last'}})
+    return await m.reply_text('📍 <b>First message saved</b>\n<blockquote>Now send the <u>last message link</u> from this storage batch.</blockquote>')
+   try: media=await self.storage.batch(self.app,session['batch_first_message_id'],message_id)
+   except Exception as exc:return await m.reply_text(f'❌ <b>Could not import batch</b>\n<i>{str(exc)}</i>')
+   c={'title':session['title'],'description':session['description'],'category_id':session['category_id'],'cover_file_id':session['cover']['file_id'],'cover_storage_message_id':session['cover']['storage_message_id'],'price':session['price'],'views':0,'unlock_count':0,'media_count':len(media),'active':True,'created_at':now(),'updated_at':now()}
+   result=await self.db.collections.insert_one(c)
+   await self.db.collection_media.insert_many([{'collection_id':result.inserted_id,**item,'order':index} for index,item in enumerate(media)])
+   await self.db.admin_sessions.delete_one({'_id':session['_id']})
+   return await m.reply_text(f'✅ <b>Collection published!</b>\n<blockquote><b>{c["title"]}</b>\n📦 {len(media)} files imported from the storage channel.</blockquote>')
   if session and text and not text.startswith('/') and session.get('stage') in ('title','category','price','description'):
    stage=session['stage']
    if stage=='title':
