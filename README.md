@@ -51,6 +51,8 @@ Admins can temporarily test optional Pyrofork button styling with `/buttonstyles
 
 Admin user tools: `/ban ID reason`, `/unban ID`, `/tokens ID +/-amount`. Each balance adjustment receives an immutable transaction log. Reply to broadcast media/text with `/broadcast` in an extended deployment handler.
 
+Use **Admin → Admins → Add Admin** to grant an additional numeric Telegram ID access to `/admin`; these added administrators are stored in MongoDB and survive restarts. Use `/cancel` to clear your active admin workflow, or `/restart` to restart the bot process.
+
 ## Deploy Render
 
 Push this repository, create a **Background Worker**, select Docker, and configure all variables from `.env.example` in Render’s Environment page. `render.yaml` defines the worker command. Do not use a web service: the bot is a long-running polling worker.

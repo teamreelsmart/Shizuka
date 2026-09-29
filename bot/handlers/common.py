@@ -30,7 +30,15 @@ def register_common(app,svc):
  async def admin(_,m):
   try:await svc.admin(m)
   except Exception as exc:await report('admin command',m,exc)
- @app.on_message(filters.private & ~filters.command(['start','checkin','admin']))
+ @app.on_message(filters.command('cancel'))
+ async def cancel(_,m):
+  try:await svc.cancel(m)
+  except Exception as exc:await report('cancel command',m,exc)
+ @app.on_message(filters.command('restart'))
+ async def restart(_,m):
+  try:await svc.restart(m)
+  except Exception as exc:await report('restart command',m,exc)
+ @app.on_message(filters.private & ~filters.command(['start','checkin','admin','cancel','restart']))
  async def input_(_,m):
   try:await svc.input(m)
   except Exception as exc:await report('input handler',m,exc)

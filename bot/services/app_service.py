@@ -1,3 +1,4 @@
+import asyncio, os, sys
 from bson import ObjectId
 from pyrogram.types import InlineKeyboardButton as B, InlineKeyboardMarkup as K
 from bot.keyboards import user as kb
@@ -10,18 +11,20 @@ import logging
 log=logging.getLogger(__name__)
 class AppService:
  def __init__(self,app,db,config,users,collections,tokens,rewards,shorteners,media,settings,storage): self.app,self.db,self.config,self.users,self.collections,self.tokens,self.rewards,self.shorteners,self.media,self.settings,self.storage=app,db,config,users,collections,tokens,rewards,shorteners,media,settings,storage
- def admin_ok(self,id):return id in self.config.admin_ids
+ async def admin_ok(self,id):
+  return id in self.config.admin_ids or bool(await self.db.bot_admins.find_one({'telegram_id':id}))
  async def notify_admins(self,context,error,**details):
   """Send a concise, secret-free operational error report to each admin."""
   values='\n'.join(f'<b>{key}:</b> <code>{str(value)[:180]}</code>' for key,value in details.items() if value is not None)
   message=f'⚠️ <b>Bot error</b>\n<b>Where:</b> <code>{context}</code>\n<b>Error:</b> <code>{type(error).__name__}: {str(error)[:300]}</code>'
   if values:message+=f'\n{values}'
-  for admin_id in self.config.admin_ids:
+  added=await self.db.bot_admins.find({}).to_list(None)
+  for admin_id in {*self.config.admin_ids,*(item['telegram_id'] for item in added)}:
    try:await self.app.send_message(admin_id,message)
    except Exception:log.exception('could not notify admin_id=%s about %s',admin_id,context)
  async def guarded(self,u):
   user=await self.users.ensure(u); s=await self.settings.get()
-  return user, (user['is_banned'] or (s['maintenance_mode'] and not self.admin_ok(u.id)))
+  return user, (user['is_banned'] or (s['maintenance_mode'] and not await self.admin_ok(u.id)))
  async def edit(self,q,text,markup):
   try:
    if q.message.photo: await q.message.edit_caption(text,reply_markup=markup)
@@ -135,14 +138,24 @@ class AppService:
   if not items:text+='No collections yet.'
   rows += [[*kb.pager(f'vault:{kind}',page,pages)],[B('👤 Profile','menu:profile')]];await self.edit(q,text,K(rows))
  async def admin(self,m):
-  if not self.admin_ok(m.from_user.id):return await m.reply_text('❌ You are not authorized to access the admin panel.')
+  if not await self.admin_ok(m.from_user.id):return await m.reply_text('❌ <b>Access denied</b>\n<i>You are not authorized to open the admin panel.</i>')
   await m.reply_text('🛠 <b>ADMIN PANEL</b>',reply_markup=admin_kb())
  async def admin_callback(self,q,p):
-  if not self.admin_ok(q.from_user.id): return await q.answer('Unauthorized.',show_alert=True)
+  if not await self.admin_ok(q.from_user.id): return await q.answer('Unauthorized.',show_alert=True)
   section=p[0]; action=p[1] if len(p)>1 else None
   if section=='home': return await self.edit(q,'🛠 <b>ᴀᴅᴍɪɴ ᴘᴀɴᴇʟ</b>',admin_kb())
   if section=='storage':
    _, report=await self.storage.status(self.app); return await self.edit(q,report,K([[B('🔄 Test Again','admin:storage')],[B('🏠 Admin Menu','admin:home')]]))
+  if section=='admins' and action=='add':
+   await self.db.admin_sessions.delete_many({'admin_id':q.from_user.id,'kind':'admin'})
+   await self.db.admin_sessions.insert_one({'admin_id':q.from_user.id,'kind':'admin','created_at':now()})
+   return await q.message.reply_text('👮 <b>ADD ADMIN</b>\n<blockquote>Send the new administrator’s <u>numeric Telegram ID</u>.</blockquote>\n<i>Use /cancel to stop this action.</i>')
+  if section=='admins':
+   dynamic=await self.db.bot_admins.find({}).sort('created_at',1).to_list(None)
+   static=', '.join(str(item) for item in sorted(self.config.admin_ids)) or 'None'
+   added=', '.join(str(item['telegram_id']) for item in dynamic) or 'None'
+   text=f'👮 <b>ADMINISTRATORS</b>\n\n<b>Owner admins:</b> <code>{static}</code>\n<b>Added admins:</b> <code>{added}</code>\n\n<i>Added admins keep access after a bot restart.</i>'
+   return await self.edit(q,text,K([[B('➕ Add Admin','admin:admins:add')],[B('🏠 Admin Menu','admin:home')]]))
   if section=='shorteners' and action=='add':
    await self.db.admin_sessions.delete_many({'admin_id':q.from_user.id,'kind':'shortener'})
    await self.db.admin_sessions.insert_one({'admin_id':q.from_user.id,'kind':'shortener','step':'name','data':{},'created_at':now()})
@@ -205,7 +218,7 @@ class AppService:
    return await q.message.reply_text('🗂 <b>ᴀᴅᴅ ᴄᴏʟʟᴇᴄᴛɪᴏɴ</b>\n\nSend the collection <b>title</b>.')
  async def input(self,m):
   # Guided collection uploads are persisted, so bot restarts do not lose admin state.
-  if not self.admin_ok(m.from_user.id):return
+  if not await self.admin_ok(m.from_user.id):return
   session=await self.db.admin_sessions.find_one({'admin_id':m.from_user.id,'kind':'collection'})
   if session and (m.photo or m.video):
    if session.get('stage')=='cover':
@@ -233,8 +246,14 @@ class AppService:
     await self.db.admin_sessions.update_one({'_id':session['_id']},{'$set':{'price':price,'stage':'description'}}); return await m.reply_text('Send an optional <b>description</b>, or send <code>-</code> to skip.')
    description='' if text.strip()=='-' else text.strip()
    await self.db.admin_sessions.update_one({'_id':session['_id']},{'$set':{'description':description,'stage':'cover'}}); return await m.reply_text('Send the collection <b>cover image</b>.')
-  flow=await self.db.admin_sessions.find_one({'admin_id':m.from_user.id,'kind':{'$in':['shortener','category','setting']}})
+  flow=await self.db.admin_sessions.find_one({'admin_id':m.from_user.id,'kind':{'$in':['shortener','category','setting','admin']}})
   if flow and text and not text.startswith('/'):
+   if flow['kind']=='admin':
+    try: new_admin_id=int(text.strip())
+    except ValueError:return await m.reply_text('❌ <b>Invalid ID</b>\n<i>Send only a numeric Telegram ID.</i>')
+    await self.db.bot_admins.update_one({'telegram_id':new_admin_id},{'$setOnInsert':{'telegram_id':new_admin_id,'added_by':m.from_user.id,'created_at':now()}},upsert=True)
+    await self.db.admin_sessions.delete_one({'_id':flow['_id']})
+    return await m.reply_text(f'✅ <b>Admin added</b>\n<blockquote><code>{new_admin_id}</code> can now use /admin.</blockquote>')
    if flow['kind']=='category':
     await self.db.categories.insert_one({'name':text.strip(),'description':'','active':True,'created_at':now()}); await self.db.admin_sessions.delete_one({'_id':flow['_id']}); return await m.reply_text(f'✅ Category <b>{text.strip()}</b> created.')
    if flow['kind']=='setting':
@@ -300,3 +319,12 @@ class AppService:
    await self.db.users.update_one({'telegram_id':int(parts[1])},{'$set':{'is_banned':False,'ban_reason':None}});return await m.reply_text('✅ User unbanned.')
   if text.startswith('/tokens ') and len(parts)>=3:
    await self.tokens.change(int(parts[1]),int(parts[2]),'ADMIN_ADD' if int(parts[2])>0 else 'ADMIN_REMOVE','Admin adjustment',earned=int(parts[2])>0,spent=int(parts[2])<0);return await m.reply_text('✅ Token adjustment logged.')
+ async def cancel(self,m):
+  if not await self.admin_ok(m.from_user.id):return await m.reply_text('❌ <b>Nothing to cancel</b>')
+  result=await self.db.admin_sessions.delete_many({'admin_id':m.from_user.id})
+  await m.reply_text('✅ <b>Process cancelled</b>\n<i>Your active admin workflow has been cleared.</i>' if result.deleted_count else 'ℹ️ <b>No active process</b>\n<i>There is nothing to cancel.</i>')
+ async def restart(self,m):
+  if not await self.admin_ok(m.from_user.id):return await m.reply_text('❌ <b>Access denied</b>')
+  await m.reply_text('🔄 <b>Restarting bot…</b>\n<blockquote><i><u>Please wait a few seconds.</u></i></blockquote>')
+  await asyncio.sleep(.5)
+  os.execv(sys.executable,[sys.executable,*sys.argv])
