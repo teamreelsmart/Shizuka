@@ -1,3 +1,4 @@
+import secrets, string
 from pymongo import ReturnDocument
 from bot.utils.time import now
 class CollectionService:
@@ -11,10 +12,24 @@ class CollectionService:
   if category_id:q['category_id']=category_id
   return await self.db.collections.find_one(q,sort=[('created_at',-1)])
  async def adjacent(self,c,direction):
-  op='$lt' if direction=='prev' else '$gt'; order=-1 if direction=='prev' else 1
-  q={'active':True,'created_at':{op:c['created_at']}}
-  if c.get('category_id'):q['category_id']=c['category_id']
-  return await self.db.collections.find_one(q,sort=[('created_at',order)])
+  # Indexing a deterministic ordered list avoids timestamp ties and lets the
+  # main Start Watching feed move across categories.
+  items=await self.db.collections.find({'active':True}).sort([('created_at',-1),('_id',-1)]).to_list(None)
+  index=next((i for i,item in enumerate(items) if item['_id']==c['_id']),None)
+  target=index+1 if direction=='prev' else index-1
+  return items[target] if index is not None and 0<=target<len(items) else None
+ async def share_token(self,c):
+  if c.get('share_token'):return c['share_token']
+  alphabet=string.ascii_letters+string.digits
+  for _ in range(5):
+   token=''.join(secrets.choice(alphabet) for _ in range(10))
+   result=await self.db.collections.update_one({'_id':c['_id'],'share_token':{'$exists':False}},{'$set':{'share_token':token}})
+   if result.modified_count:return token
+   existing=await self.db.collections.find_one({'_id':c['_id']})
+   if existing and existing.get('share_token'):return existing['share_token']
+  raise RuntimeError('could not create collection share token')
+ async def by_share_token(self,token):
+  return await self.db.collections.find_one({'share_token':token,'active':True})
  async def unlock(self,user_id,c):
   from pymongo.errors import DuplicateKeyError
   try:

@@ -42,6 +42,10 @@ class AppService:
     await m.reply_text(f'🎉 <b>Reward Credited</b>\n\n💰 +{reward} Tokens added to your wallet.\n🪙 Balance: {updated["balance"]} tokens\n📊 Today\'s Earnings: {earned}/{limit} tokens\n\nEnjoy your media stream!')
    else: await m.reply_text('🚫 Suspicious verification detected; your account was restricted.' if state=='banned' else '❌ This sponsor session is expired or unavailable.')
    return
+  if args and not args.isdigit():
+   collection=await self.collections.by_share_token(args)
+   if collection:
+    return await self.show_collection_message(m,user,collection)
   if blocked: await m.reply_text('🚫 Your account is currently restricted.' if user['is_banned'] else '🛠 Bot is currently under maintenance.');return
   if args.isdigit() and user.get('referred_by') is None:
    reward=(await self.settings.get())['referral_reward']; referrer_id=int(args)
@@ -100,12 +104,16 @@ class AppService:
    if not await self.users.daily_view(u['telegram_id'],s['daily_free_limit']):return await self.edit(q,'🎬 <b>Daily free limit reached</b>\n<blockquote><i>Earn tokens or unlock a collection to keep watching.</i></blockquote>',K([[B('💰 Earn Tokens','menu:earn')],[B('📦 Browse Collections','menu:start'),B('🏠 Main Menu','menu:home')]]))
    c=await self.collections.latest();return await self.show_collection(q,u,c) if c else await self.edit(q,'📭 No active collections are available yet.',kb.back())
  async def show_collection(self,q,u,c):
-  s=await self.settings.get();await self.collections.viewed(u['telegram_id'],c,s['view_window_seconds']);cat=await self.db.categories.find_one({'_id':ObjectId(c['category_id'])}) if c.get('category_id') else None;saved=bool(await self.db.saved_collections.find_one({'user_id':u['telegram_id'],'collection_id':c['_id']}));text=collection_text(c,(cat or {}).get('name','Uncategorized')); markup=kb.card(str(c['_id']),saved)
+  s=await self.settings.get();await self.collections.viewed(u['telegram_id'],c,s['view_window_seconds']);cat=await self.db.categories.find_one({'_id':ObjectId(c['category_id'])}) if c.get('category_id') else None;saved=bool(await self.db.saved_collections.find_one({'user_id':u['telegram_id'],'collection_id':c['_id']}));text=collection_text(c,(cat or {}).get('name','Uncategorized')); token=await self.collections.share_token(c); markup=kb.card(str(c['_id']),saved,f'https://t.me/{self.config.bot_username}?start={token}')
   try:
    from pyrogram.types import InputMediaPhoto
    if q.message.photo: return await q.message.edit_media(InputMediaPhoto(c['cover_file_id'],caption=text),reply_markup=markup)
    await q.message.reply_photo(c['cover_file_id'],caption=text,reply_markup=markup); return await self.edit(q,'📦 <b>Collection card opened below.</b>',kb.back())
   except Exception: return await self.edit(q,text,markup)
+ async def show_collection_message(self,m,u,c):
+  s=await self.settings.get();await self.collections.viewed(u['telegram_id'],c,s['view_window_seconds']);cat=await self.db.categories.find_one({'_id':ObjectId(c['category_id'])}) if c.get('category_id') else None;saved=bool(await self.db.saved_collections.find_one({'user_id':u['telegram_id'],'collection_id':c['_id']}));text=collection_text(c,(cat or {}).get('name','Uncategorized'));token=await self.collections.share_token(c);markup=kb.card(str(c['_id']),saved,f'https://t.me/{self.config.bot_username}?start={token}')
+  try:return await m.reply_photo(c['cover_file_id'],caption=text,reply_markup=markup)
+  except Exception:return await m.reply_text(text,reply_markup=markup)
  async def collection_action(self,q,u,p):
   c=await self.collections.get(p[2]);
   if not c:return await q.answer('This collection no longer exists.',show_alert=True)
@@ -126,6 +134,8 @@ class AppService:
    await self.notify_admins('shortener task creation',exc,user_id=u['telegram_id'],provider=s.get('name'),shortener_id=sid)
    return await q.answer('❌ The sponsor task could not be created. The admin has been notified.',show_alert=True)
   if error:
+   if error.startswith('⏳'):
+    return await q.message.reply_text(f'⏳ <b>Task already completed</b>\n<blockquote>{error[2:]}</blockquote>\n<i>Please wait for the cooldown before trying this sponsor again.</i>')
    if error.startswith('❌'):
     await self.notify_admins('shortener API request',RuntimeError(error_detail or error),user_id=u['telegram_id'],provider=s.get('name'),shortener_id=sid)
    return await q.answer(error,show_alert=True)
