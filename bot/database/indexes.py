@@ -9,4 +9,5 @@ async def create_indexes(db):
     unique = {'users', 'unlocked_collections', 'saved_collections', 'referrals', 'collection_views'}
     for collection, keys in specs.items():
         await db[collection].create_index(keys, unique=collection in unique)
+    await db.collections.create_index('share_token', unique=True, sparse=True)
     await db.shortener_tasks.create_index('expires_at', expireAfterSeconds=0)

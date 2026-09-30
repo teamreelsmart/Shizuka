@@ -1,3 +1,4 @@
+import asyncio, os, re, sys
 from bson import ObjectId
 from pyrogram.types import InlineKeyboardButton as B, InlineKeyboardMarkup as K
 from bot.keyboards import user as kb
@@ -5,12 +6,25 @@ from bot.keyboards.admin import main as admin_kb
 from bot.utils.formatting import collection_text
 from bot.utils.pagination import page_data
 from bot.utils.time import now
+import logging
+
+log=logging.getLogger(__name__)
 class AppService:
  def __init__(self,app,db,config,users,collections,tokens,rewards,shorteners,media,settings,storage): self.app,self.db,self.config,self.users,self.collections,self.tokens,self.rewards,self.shorteners,self.media,self.settings,self.storage=app,db,config,users,collections,tokens,rewards,shorteners,media,settings,storage
- def admin_ok(self,id):return id in self.config.admin_ids
+ async def admin_ok(self,id):
+  return id in self.config.admin_ids or bool(await self.db.bot_admins.find_one({'telegram_id':id}))
+ async def notify_admins(self,context,error,**details):
+  """Send a concise, secret-free operational error report to each admin."""
+  values='\n'.join(f'<b>{key}:</b> <code>{str(value)[:180]}</code>' for key,value in details.items() if value is not None)
+  message=f'⚠️ <b>Bot error</b>\n<b>Where:</b> <code>{context}</code>\n<b>Error:</b> <code>{type(error).__name__}: {str(error)[:300]}</code>'
+  if values:message+=f'\n{values}'
+  added=await self.db.bot_admins.find({}).to_list(None)
+  for admin_id in {*self.config.admin_ids,*(item['telegram_id'] for item in added)}:
+   try:await self.app.send_message(admin_id,message)
+   except Exception:log.exception('could not notify admin_id=%s about %s',admin_id,context)
  async def guarded(self,u):
   user=await self.users.ensure(u); s=await self.settings.get()
-  return user, (user['is_banned'] or (s['maintenance_mode'] and not self.admin_ok(u.id)))
+  return user, (user['is_banned'] or (s['maintenance_mode'] and not await self.admin_ok(u.id)))
  async def edit(self,q,text,markup):
   try:
    if q.message.photo: await q.message.edit_caption(text,reply_markup=markup)
@@ -20,18 +34,32 @@ class AppService:
   user,blocked=await self.guarded(m.from_user)
   args=m.command[1] if len(m.command)>1 else ''
   if args.startswith('task_'):
-   state,reward=await self.shorteners.verify(m.from_user.id,args[5:],await self.settings.get())
-   await m.reply_text('🎉 Verification complete! +%s Tokens.'%reward if state=='ok' else ('🚫 Suspicious verification detected; your account was restricted.' if state=='banned' else '❌ This sponsor session is expired or unavailable.'));return
+   settings=await self.settings.get(); state,reward=await self.shorteners.verify(m.from_user.id,args[5:],settings)
+   if state=='ok':
+    updated=await self.db.users.find_one({'telegram_id':m.from_user.id})
+    earned=await self.tokens.earned_today(m.from_user.id)
+    limit=settings.get('daily_shortener_earning_limit',50)
+    await m.reply_text(f'🎉 <b>Reward Credited</b>\n\n💰 +{reward} Tokens added to your wallet.\n🪙 Balance: {updated["balance"]} tokens\n📊 Today\'s Earnings: {earned}/{limit} tokens\n\nEnjoy your media stream!')
+   else: await m.reply_text('🚫 Suspicious verification detected; your account was restricted.' if state=='banned' else '❌ This sponsor session is expired or unavailable.')
+   return
+  if args and not args.isdigit():
+   collection=await self.collections.by_share_token(args)
+   if collection:
+    return await self.show_collection_message(m,user,collection)
   if blocked: await m.reply_text('🚫 Your account is currently restricted.' if user['is_banned'] else '🛠 Bot is currently under maintenance.');return
-  if args.isdigit() and user.get('referred_by') is None: await self.rewards.referral(m.from_user.id,int(args),(await self.settings.get())['referral_reward'])
+  if args.isdigit() and user.get('referred_by') is None:
+   reward=(await self.settings.get())['referral_reward']; referrer_id=int(args)
+   if await self.rewards.referral(m.from_user.id,referrer_id,reward):
+    try:await self.app.send_message(referrer_id,f'🎉 <b>New Referral!</b>\n\nHey! {user["first_name"]} joined using your referral link.\n💰 +{reward} Tokens have been added to your wallet.')
+    except Exception:log.exception('could not notify referrer_id=%s',referrer_id)
   await m.reply_text(await self.welcome(user),reply_markup=kb.menu())
  async def welcome(self,u):
   unlocked=await self.db.unlocked_collections.count_documents({'user_id':u['telegram_id']});saved=await self.db.saved_collections.count_documents({'user_id':u['telegram_id']})
-  return f'🎀 Welcome, {u["first_name"]}!\n\n👛 Token Balance: {u["balance"]}\n📦 Unlocked Collections: {unlocked}\n🔖 Saved Collections: {saved}'
+  return f'🎀 <b>Welcome, {u["first_name"]}!</b>\n<blockquote><i>Your personal media lounge is ready.</i></blockquote>\n👛 <b>Token Balance:</b> <code>{u["balance"]}</code>\n📦 <b>Unlocked Collections:</b> {unlocked}\n🔖 <b>Saved Collections:</b> {saved}'
  async def checkin(self,m):
   u,blocked=await self.guarded(m.from_user)
   if blocked:return
-  got=await self.rewards.checkin(u,await self.settings.get());await m.reply_text(f'🎁 Check-in claimed: +{got[0]} Tokens! Streak: {got[1]} day(s).' if got else '⏳ You have already claimed today.')
+  got=await self.rewards.checkin(u,await self.settings.get());await m.reply_text(f'🎁 <b>Check-in claimed!</b>\n<blockquote>💰 +{got[0]} Tokens\n🔥 <i>Streak: {got[1]} day(s)</i></blockquote>' if got else '⏳ <b>Already claimed today</b>\n<i>Come back tomorrow for your next reward.</i>')
  async def callback(self,q):
   u,blocked=await self.guarded(q.from_user)
   if blocked:await q.answer('Account unavailable.',show_alert=True);return
@@ -73,15 +101,19 @@ class AppService:
   if which=='refer':return await self.edit(q,f'👥 <b>REFER FRIENDS</b>\n\nShare your personal invite link:\nhttps://t.me/{self.config.bot_username}?start={u["telegram_id"]}\n\nEarn {(await self.settings.get())["referral_reward"]} Tokens for each new friend!',kb.back())
   if which=='start':
    s=await self.settings.get()
-   if not await self.users.daily_view(u['telegram_id'],s['daily_free_limit']):return await self.edit(q,'🎬 Your free daily limit has been reached. Unlock collections to receive all media.',K([[B('💰 Earn Tokens','menu:earn')],[B('📦 Browse Collections','menu:start'),B('🏠 Main Menu','menu:home')]]))
+   if not await self.users.daily_view(u['telegram_id'],s['daily_free_limit']):return await self.edit(q,'🎬 <b>Daily free limit reached</b>\n<blockquote><i>Earn tokens or unlock a collection to keep watching.</i></blockquote>',K([[B('💰 Earn Tokens','menu:earn')],[B('📦 Browse Collections','menu:start'),B('🏠 Main Menu','menu:home')]]))
    c=await self.collections.latest();return await self.show_collection(q,u,c) if c else await self.edit(q,'📭 No active collections are available yet.',kb.back())
  async def show_collection(self,q,u,c):
-  s=await self.settings.get();await self.collections.viewed(u['telegram_id'],c,s['view_window_seconds']);cat=await self.db.categories.find_one({'_id':ObjectId(c['category_id'])}) if c.get('category_id') else None;saved=bool(await self.db.saved_collections.find_one({'user_id':u['telegram_id'],'collection_id':c['_id']}));text=collection_text(c,(cat or {}).get('name','Uncategorized')); markup=kb.card(str(c['_id']),saved)
+  s=await self.settings.get();await self.collections.viewed(u['telegram_id'],c,s['view_window_seconds']);cat=await self.db.categories.find_one({'_id':ObjectId(c['category_id'])}) if c.get('category_id') else None;saved=bool(await self.db.saved_collections.find_one({'user_id':u['telegram_id'],'collection_id':c['_id']}));text=collection_text(c,(cat or {}).get('name','Uncategorized')); token=await self.collections.share_token(c); markup=kb.card(str(c['_id']),saved,f'https://t.me/{self.config.bot_username}?start={token}')
   try:
    from pyrogram.types import InputMediaPhoto
    if q.message.photo: return await q.message.edit_media(InputMediaPhoto(c['cover_file_id'],caption=text),reply_markup=markup)
    await q.message.reply_photo(c['cover_file_id'],caption=text,reply_markup=markup); return await self.edit(q,'📦 <b>Collection card opened below.</b>',kb.back())
   except Exception: return await self.edit(q,text,markup)
+ async def show_collection_message(self,m,u,c):
+  s=await self.settings.get();await self.collections.viewed(u['telegram_id'],c,s['view_window_seconds']);cat=await self.db.categories.find_one({'_id':ObjectId(c['category_id'])}) if c.get('category_id') else None;saved=bool(await self.db.saved_collections.find_one({'user_id':u['telegram_id'],'collection_id':c['_id']}));text=collection_text(c,(cat or {}).get('name','Uncategorized'));token=await self.collections.share_token(c);markup=kb.card(str(c['_id']),saved,f'https://t.me/{self.config.bot_username}?start={token}')
+  try:return await m.reply_photo(c['cover_file_id'],caption=text,reply_markup=markup)
+  except Exception:return await m.reply_text(text,reply_markup=markup)
  async def collection_action(self,q,u,p):
   c=await self.collections.get(p[2]);
   if not c:return await q.answer('This collection no longer exists.',show_alert=True)
@@ -90,15 +122,24 @@ class AppService:
   if state=='insufficient':return await self.edit(q,f'❌ <b>Insufficient Balance</b>\n\nRequired: {c["price"]} Tokens\nYour balance: {u["balance"]} Tokens',K([[B('💰 Earn Tokens','menu:earn')],[B('🏠 Main Menu','menu:home')]]))
   if state in ('unlocked','already'):
    await q.answer('Already unlocked — sending again.' if state=='already' else 'Unlocked! Sending media.')
-   s=await self.settings.get(); count=await self.media.deliver(self.app,u['telegram_id'],c,s['cleanup_after_minutes'],s['cleanup_enabled'])
+   s=await self.settings.get(); count=await self.media.deliver(self.app,u['telegram_id'],c,s['cleanup_after_minutes'],s['cleanup_enabled'],s.get('protected_content',False))
    if not count:await q.message.reply_text('⚠️ This collection has no deliverable media. Please contact an admin.')
  async def task(self,q,u,sid):
   try:s=await self.db.shorteners.find_one({'_id':ObjectId(sid),'enabled':True})
   except Exception:s=None
   if not s:return await q.answer('Task unavailable.',show_alert=True)
-  task,error=await self.shorteners.create(u['telegram_id'],s,await self.settings.get())
-  if error:return await q.answer(error,show_alert=True)
-  await q.message.reply_text(f'👀 <b>{s["name"]}</b>\n\nComplete the sponsor flow, then return using this link after approximately 3 minutes:\n{task["url"]}\n\nReward: {s["reward_tokens"]} Tokens.')
+  try:task,error,error_detail=await self.shorteners.create(u['telegram_id'],s,await self.settings.get())
+  except Exception as exc:
+   log.exception('task creation failed user_id=%s shortener_id=%s',u['telegram_id'],sid)
+   await self.notify_admins('shortener task creation',exc,user_id=u['telegram_id'],provider=s.get('name'),shortener_id=sid)
+   return await q.answer('❌ The sponsor task could not be created. The admin has been notified.',show_alert=True)
+  if error:
+   if error.startswith('⏳'):
+    return await q.message.reply_text(f'⏳ <b>Task already completed</b>\n<blockquote>{error[2:]}</blockquote>\n<i>Please wait for the cooldown before trying this sponsor again.</i>')
+   if error.startswith('❌'):
+    await self.notify_admins('shortener API request',RuntimeError(error_detail or error),user_id=u['telegram_id'],provider=s.get('name'),shortener_id=sid)
+   return await q.answer(error,show_alert=True)
+  await q.message.reply_text(f'📋 <b>Task: {s["name"]}</b>\n\n🎁 <b>Reward:</b> <u>+{s["reward_tokens"]} Tokens</u>\n\n<b>3 Quick Steps:</b>\n1. Tap <b>Open Verification Link</b> below\n2. Complete the quick <i>30-sec sponsor verification</i>\n3. Tap <b>Start</b> when returned to Telegram to claim your tokens!\n\n<blockquote><i>Link is valid for 30 minutes. Available once every {s["cooldown_hours"]} hours.</i></blockquote>',reply_markup=K([[B('🔗 Open Verification Link',url=task['url'])]]))
  async def vault(self,q,u,kind,page):
   source='unlocked_collections' if kind=='unlocked' else 'saved_collections'; total=await self.db[source].count_documents({'user_id':u['telegram_id']});page,pages,size=page_data(total,page);items=await self.db[source].find({'user_id':u['telegram_id']}).sort('unlocked_at' if kind=='unlocked' else 'saved_at',-1).skip(page*size).limit(size).to_list(size);rows=[];text=f'📦 <b>YOUR {kind.upper()} COLLECTIONS</b>\n\n'
   for i,x in enumerate(items,page*size+1):
@@ -107,14 +148,24 @@ class AppService:
   if not items:text+='No collections yet.'
   rows += [[*kb.pager(f'vault:{kind}',page,pages)],[B('👤 Profile','menu:profile')]];await self.edit(q,text,K(rows))
  async def admin(self,m):
-  if not self.admin_ok(m.from_user.id):return await m.reply_text('❌ You are not authorized to access the admin panel.')
+  if not await self.admin_ok(m.from_user.id):return await m.reply_text('❌ <b>Access denied</b>\n<i>You are not authorized to open the admin panel.</i>')
   await m.reply_text('🛠 <b>ADMIN PANEL</b>',reply_markup=admin_kb())
  async def admin_callback(self,q,p):
-  if not self.admin_ok(q.from_user.id): return await q.answer('Unauthorized.',show_alert=True)
+  if not await self.admin_ok(q.from_user.id): return await q.answer('Unauthorized.',show_alert=True)
   section=p[0]; action=p[1] if len(p)>1 else None
   if section=='home': return await self.edit(q,'🛠 <b>ᴀᴅᴍɪɴ ᴘᴀɴᴇʟ</b>',admin_kb())
   if section=='storage':
    _, report=await self.storage.status(self.app); return await self.edit(q,report,K([[B('🔄 Test Again','admin:storage')],[B('🏠 Admin Menu','admin:home')]]))
+  if section=='admins' and action=='add':
+   await self.db.admin_sessions.delete_many({'admin_id':q.from_user.id,'kind':'admin'})
+   await self.db.admin_sessions.insert_one({'admin_id':q.from_user.id,'kind':'admin','created_at':now()})
+   return await q.message.reply_text('👮 <b>ADD ADMIN</b>\n<blockquote>Send the new administrator’s <u>numeric Telegram ID</u>.</blockquote>\n<i>Use /cancel to stop this action.</i>')
+  if section=='admins':
+   dynamic=await self.db.bot_admins.find({}).sort('created_at',1).to_list(None)
+   static=', '.join(str(item) for item in sorted(self.config.admin_ids)) or 'None'
+   added=', '.join(str(item['telegram_id']) for item in dynamic) or 'None'
+   text=f'👮 <b>ADMINISTRATORS</b>\n\n<b>Owner admins:</b> <code>{static}</code>\n<b>Added admins:</b> <code>{added}</code>\n\n<i>Added admins keep access after a bot restart.</i>'
+   return await self.edit(q,text,K([[B('➕ Add Admin','admin:admins:add')],[B('🏠 Admin Menu','admin:home')]]))
   if section=='shorteners' and action=='add':
    await self.db.admin_sessions.delete_many({'admin_id':q.from_user.id,'kind':'shortener'})
    await self.db.admin_sessions.insert_one({'admin_id':q.from_user.id,'kind':'shortener','step':'name','data':{},'created_at':now()})
@@ -152,7 +203,7 @@ class AppService:
    await self.db.admin_sessions.insert_one({'admin_id':q.from_user.id,'kind':'setting','key':action})
    return await q.message.reply_text(f'⚙️ Send a new value for <b>{action}</b>.')
   if section in ('economy','rewards','settings','system'):
-   values=await self.settings.get(); keys={'economy':['daily_free_limit','default_collection_price'],'rewards':['checkin_base_reward','checkin_streak_bonus','referral_reward'],'settings':['cleanup_enabled','cleanup_after_minutes'],'system':['maintenance_mode']}[section]
+   values=await self.settings.get(); keys={'economy':['daily_free_limit','default_collection_price'],'rewards':['checkin_base_reward','checkin_streak_bonus','referral_reward'],'settings':['cleanup_enabled','cleanup_after_minutes','protected_content'],'system':['maintenance_mode']}[section]
    rows=[[B(f'{key}: {values.get(key)}',f'admin:set:{key}')] for key in keys]; rows.append([B('🏠 Admin Menu','admin:home')])
    return await self.edit(q,f'⚙️ <b>{section.upper()}</b>\n\nTap a value to update it.',K(rows))
   if section=='collections' and action=='delete' and len(p)>2:
@@ -177,19 +228,34 @@ class AppService:
    return await q.message.reply_text('🗂 <b>ᴀᴅᴅ ᴄᴏʟʟᴇᴄᴛɪᴏɴ</b>\n\nSend the collection <b>title</b>.')
  async def input(self,m):
   # Guided collection uploads are persisted, so bot restarts do not lose admin state.
-  if not self.admin_ok(m.from_user.id):return
+  if not await self.admin_ok(m.from_user.id):return
   session=await self.db.admin_sessions.find_one({'admin_id':m.from_user.id,'kind':'collection'})
-  if session and (m.photo or m.video):
+  if session and (m.photo or m.video) and session.get('stage') in ('cover','media'):
    if session.get('stage')=='cover':
 
     try: cover=await self.storage.archive(self.app,m)
     except Exception: return await m.reply_text('❌ Could not archive cover to the Storage Channel. Use Admin → Storage Status/Test, then retry.')
-    await self.db.admin_sessions.update_one({'_id':session['_id']},{'$set':{'cover':cover,'stage':'media'}});return await m.reply_text('Cover stored permanently. Send photos/videos in order, then /finishcollection.')
+    await self.db.admin_sessions.update_one({'_id':session['_id']},{'$set':{'cover':cover,'stage':'batch_first'}});return await m.reply_text('✅ <b>Cover saved</b>\n<blockquote>Now send the <u>first message link</u> from the storage channel batch.</blockquote>\n<i>Example: https://t.me/c/3995725849/123</i>')
 
    try: media=await self.storage.archive(self.app,m)
    except Exception: return await m.reply_text('❌ Could not archive media to the Storage Channel. Use Admin → Storage Status/Test, then retry.')
    await self.db.admin_sessions.update_one({'_id':session['_id']},{'$push':{'media':media}});return await m.reply_text('Media stored permanently. Send more or /finishcollection.')
   text=m.text or ''; parts=text.split(maxsplit=2)
+  if session and text and not text.startswith('/') and session.get('stage') in ('batch_first','batch_last'):
+   match=re.fullmatch(r'https?://t\.me/(?:c/(\d+)|[A-Za-z0-9_]+)/([0-9]+)/?',text.strip())
+   if not match:return await m.reply_text('❌ <b>Invalid message link</b>\n<i>Send the full storage-channel message link, for example https://t.me/c/3995725849/123.</i>')
+   if match.group(1) and match.group(1) != str(self.config.storage_channel_id).removeprefix('-100'):return await m.reply_text('❌ <b>Wrong storage channel</b>\n<i>Send a link from this bot’s configured storage channel.</i>')
+   message_id=int(match.group(2))
+   if session['stage']=='batch_first':
+    await self.db.admin_sessions.update_one({'_id':session['_id']},{'$set':{'batch_first_message_id':message_id,'stage':'batch_last'}})
+    return await m.reply_text('📍 <b>First message saved</b>\n<blockquote>Now send the <u>last message link</u> from this storage batch.</blockquote>')
+   try: media=await self.storage.batch(self.app,session['batch_first_message_id'],message_id)
+   except Exception as exc:return await m.reply_text(f'❌ <b>Could not import batch</b>\n<i>{str(exc)}</i>')
+   c={'title':session['title'],'description':session['description'],'category_id':session['category_id'],'cover_file_id':session['cover']['file_id'],'cover_storage_message_id':session['cover']['storage_message_id'],'price':session['price'],'views':0,'unlock_count':0,'media_count':len(media),'active':True,'created_at':now(),'updated_at':now()}
+   result=await self.db.collections.insert_one(c)
+   await self.db.collection_media.insert_many([{'collection_id':result.inserted_id,**item,'order':index} for index,item in enumerate(media)])
+   await self.db.admin_sessions.delete_one({'_id':session['_id']})
+   return await m.reply_text(f'✅ <b>Collection published!</b>\n<blockquote><b>{c["title"]}</b>\n📦 {len(media)} files imported from the storage channel.</blockquote>')
   if session and text and not text.startswith('/') and session.get('stage') in ('title','category','price','description'):
    stage=session['stage']
    if stage=='title':
@@ -205,8 +271,14 @@ class AppService:
     await self.db.admin_sessions.update_one({'_id':session['_id']},{'$set':{'price':price,'stage':'description'}}); return await m.reply_text('Send an optional <b>description</b>, or send <code>-</code> to skip.')
    description='' if text.strip()=='-' else text.strip()
    await self.db.admin_sessions.update_one({'_id':session['_id']},{'$set':{'description':description,'stage':'cover'}}); return await m.reply_text('Send the collection <b>cover image</b>.')
-  flow=await self.db.admin_sessions.find_one({'admin_id':m.from_user.id,'kind':{'$in':['shortener','category','setting']}})
+  flow=await self.db.admin_sessions.find_one({'admin_id':m.from_user.id,'kind':{'$in':['shortener','category','setting','admin']}})
   if flow and text and not text.startswith('/'):
+   if flow['kind']=='admin':
+    try: new_admin_id=int(text.strip())
+    except ValueError:return await m.reply_text('❌ <b>Invalid ID</b>\n<i>Send only a numeric Telegram ID.</i>')
+    await self.db.bot_admins.update_one({'telegram_id':new_admin_id},{'$setOnInsert':{'telegram_id':new_admin_id,'added_by':m.from_user.id,'created_at':now()}},upsert=True)
+    await self.db.admin_sessions.delete_one({'_id':flow['_id']})
+    return await m.reply_text(f'✅ <b>Admin added</b>\n<blockquote><code>{new_admin_id}</code> can now use /admin.</blockquote>')
    if flow['kind']=='category':
     await self.db.categories.insert_one({'name':text.strip(),'description':'','active':True,'created_at':now()}); await self.db.admin_sessions.delete_one({'_id':flow['_id']}); return await m.reply_text(f'✅ Category <b>{text.strip()}</b> created.')
    if flow['kind']=='setting':
@@ -243,6 +315,19 @@ class AppService:
    values[1]=str(cat['_id'])
    await self.db.admin_sessions.delete_many({'admin_id':m.from_user.id,'kind':'collection'})
    await self.db.admin_sessions.insert_one({'admin_id':m.from_user.id,'kind':'collection','stage':'cover','title':values[0],'category_id':values[1],'price':price,'description':values[3] if len(values)>3 else '','media':[],'created_at':now()});return await m.reply_text('Send collection cover image.')
+  if text.startswith('/newbatchcollection '):
+   values=[x.strip() for x in text[len('/newbatchcollection '):].split('|')]
+   if len(values)<5:return await m.reply_text('❌ <b>Usage</b>\n<blockquote>/newbatchcollection Title | Category name | Price | First storage message ID | Last storage message ID | Optional description</blockquote>')
+   try: price,first_id,last_id=int(values[2]),int(values[3]),int(values[4])
+   except ValueError:return await m.reply_text('❌ <b>Invalid input</b>\n<i>Price and both message IDs must be whole numbers.</i>')
+   category=await self.db.categories.find_one({'name':values[1],'active':True})
+   if not category:return await m.reply_text('❌ <b>Category not found</b>\n<i>Use the exact active category name.</i>')
+   try: media=await self.storage.batch(self.app,first_id,last_id)
+   except Exception as exc:return await m.reply_text(f'❌ <b>Storage batch failed</b>\n<i>{str(exc)}</i>')
+   c={'title':values[0],'description':values[5] if len(values)>5 else '','category_id':str(category['_id']),'cover_file_id':media[0]['file_id'],'cover_storage_message_id':media[0]['storage_message_id'],'price':price,'views':0,'unlock_count':0,'media_count':len(media),'active':True,'created_at':now(),'updated_at':now()}
+   result=await self.db.collections.insert_one(c)
+   await self.db.collection_media.insert_many([{'collection_id':result.inserted_id,**item,'order':index} for index,item in enumerate(media)])
+   return await m.reply_text(f'✅ <b>Batch collection published</b>\n<blockquote>{c["title"]}: {len(media)} storage files imported.</blockquote>')
   if text=='/finishcollection' and session:
    if session.get('stage')!='media' or not session.get('media'):return await m.reply_text('Send a cover and at least one photo/video first.')
    c={'title':session['title'],'description':session['description'],'category_id':session['category_id'],'cover_file_id':session['cover']['file_id'],'cover_storage_message_id':session['cover']['storage_message_id'],'price':session['price'],'views':0,'unlock_count':0,'media_count':len(session['media']),'active':True,'created_at':now(),'updated_at':now()}; result=await self.db.collections.insert_one(c)
@@ -272,3 +357,12 @@ class AppService:
    await self.db.users.update_one({'telegram_id':int(parts[1])},{'$set':{'is_banned':False,'ban_reason':None}});return await m.reply_text('✅ User unbanned.')
   if text.startswith('/tokens ') and len(parts)>=3:
    await self.tokens.change(int(parts[1]),int(parts[2]),'ADMIN_ADD' if int(parts[2])>0 else 'ADMIN_REMOVE','Admin adjustment',earned=int(parts[2])>0,spent=int(parts[2])<0);return await m.reply_text('✅ Token adjustment logged.')
+ async def cancel(self,m):
+  if not await self.admin_ok(m.from_user.id):return await m.reply_text('❌ <b>Nothing to cancel</b>')
+  result=await self.db.admin_sessions.delete_many({'admin_id':m.from_user.id})
+  await m.reply_text('✅ <b>Process cancelled</b>\n<i>Your active admin workflow has been cleared.</i>' if result.deleted_count else 'ℹ️ <b>No active process</b>\n<i>There is nothing to cancel.</i>')
+ async def restart(self,m):
+  if not await self.admin_ok(m.from_user.id):return await m.reply_text('❌ <b>Access denied</b>')
+  await m.reply_text('🔄 <b>Restarting bot…</b>\n<blockquote><i><u>Please wait a few seconds.</u></i></blockquote>')
+  await asyncio.sleep(.5)
+  os.execv(sys.executable,[sys.executable,*sys.argv])

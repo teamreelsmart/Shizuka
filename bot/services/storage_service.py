@@ -22,6 +22,19 @@ class StorageService:
             "caption": stored.caption or "",
         }
 
+    async def batch(self, app, first_message_id, last_message_id):
+        """Read an existing contiguous media range from the storage channel."""
+        if first_message_id < 1 or last_message_id < first_message_id or last_message_id-first_message_id > 999:
+            raise ValueError('message IDs must describe a range of at most 1,000 messages')
+        messages = await app.get_messages(self.channel_id, list(range(first_message_id, last_message_id + 1)))
+        records = []
+        for message_id, message in zip(range(first_message_id, last_message_id + 1), messages):
+            media = message.photo or message.video if message else None
+            if media is None:
+                raise ValueError(f'storage message {message_id} is missing or is not a photo/video')
+            records.append({'storage_message_id': message.id, 'file_id': media.file_id, 'media_type': 'photo' if message.photo else 'video', 'caption': message.caption or ''})
+        return records
+
     async def status(self, app):
         """Return a safe, human-readable channel permission report."""
         try:
