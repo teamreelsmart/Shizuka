@@ -1,4 +1,5 @@
 import asyncio, os, re, sys
+from html import escape
 from bson import ObjectId
 from pyrogram.types import InlineKeyboardButton as B, InlineKeyboardMarkup as K
 from bot.keyboards import user as kb
@@ -22,16 +23,25 @@ class AppService:
   for admin_id in {*self.config.admin_ids,*(item['telegram_id'] for item in added)}:
    try:await self.app.send_message(admin_id,message)
    except Exception:log.exception('could not notify admin_id=%s about %s',admin_id,context)
+ async def notify_new_user(self,user):
+  username=f'@{user.username}' if user.username else '(no username)'
+  message=f'🆕 <b>A new user started the bot</b>\nID: <code>{user.id}</code>\nUsername: {username}'
+  added=await self.db.bot_admins.find({}).to_list(None)
+  for admin_id in {*self.config.admin_ids,*(item['telegram_id'] for item in added)}:
+   try: await self.app.send_message(admin_id,message)
+   except Exception: log.exception('could not notify admin_id=%s about new user',admin_id)
  async def guarded(self,u):
-  user=await self.users.ensure(u); s=await self.settings.get()
-  return user, (user['is_banned'] or (s['maintenance_mode'] and not await self.admin_ok(u.id)))
+  user,created=await self.users.ensure_with_created(u); s=await self.settings.get()
+  return user, (user['is_banned'] or (s['maintenance_mode'] and not await self.admin_ok(u.id))), created
  async def edit(self,q,text,markup):
   try:
    if q.message.photo: await q.message.edit_caption(text,reply_markup=markup)
    else: await q.message.edit_text(text,reply_markup=markup)
   except Exception: await q.message.reply_text(text,reply_markup=markup)
  async def start(self,m):
-  user,blocked=await self.guarded(m.from_user)
+  user,blocked,created=await self.guarded(m.from_user)
+  if created:
+   await self.notify_new_user(m.from_user)
   args=m.command[1] if len(m.command)>1 else ''
   if args.startswith('task_'):
    settings=await self.settings.get(); state,reward=await self.shorteners.verify(m.from_user.id,args[5:],settings)
@@ -57,11 +67,11 @@ class AppService:
   unlocked=await self.db.unlocked_collections.count_documents({'user_id':u['telegram_id']});saved=await self.db.saved_collections.count_documents({'user_id':u['telegram_id']})
   return f'🎀 <b>Welcome, {u["first_name"]}!</b>\n<blockquote><i>Your personal media lounge is ready.</i></blockquote>\n👛 <b>Token Balance:</b> <code>{u["balance"]}</code>\n📦 <b>Unlocked Collections:</b> {unlocked}\n🔖 <b>Saved Collections:</b> {saved}'
  async def checkin(self,m):
-  u,blocked=await self.guarded(m.from_user)
+  u,blocked,_=await self.guarded(m.from_user)
   if blocked:return
   got=await self.rewards.checkin(u,await self.settings.get());await m.reply_text(f'🎁 <b>Check-in claimed!</b>\n<blockquote>💰 +{got[0]} Tokens\n🔥 <i>Streak: {got[1]} day(s)</i></blockquote>' if got else '⏳ <b>Already claimed today</b>\n<i>Come back tomorrow for your next reward.</i>')
  async def callback(self,q):
-  u,blocked=await self.guarded(q.from_user)
+  u,blocked,_=await self.guarded(q.from_user)
   if blocked:await q.answer('Account unavailable.',show_alert=True);return
   p=q.data.split(':'); action=p[0]
   if action=='noop':return
@@ -220,7 +230,25 @@ class AppService:
    return await self.edit(q,text,K(rows))
   if section=='stats':
    users=await self.db.users.count_documents({}); cols=await self.db.collections.count_documents({}); return await self.edit(q,f'📊 <b>sᴛᴀᴛɪsᴛɪᴄs</b>\n\n👥 Users: {users}\n📦 Collections: {cols}\n🔓 Unlocks: {await self.db.unlocked_collections.count_documents({})}',K([[B('🏠 Admin Menu','admin:home')]]))
-  if section=='users': return await self.edit(q,'👥 <b>ᴜsᴇʀs</b>\n\nUse the user-management controls to search and moderate accounts.',K([[B('🏠 Admin Menu','admin:home')]]))
+  if section=='users':
+   page=int(p[2]) if action=='page' and len(p)>2 and p[2].isdigit() else 0
+   size=20; total=await self.db.users.count_documents({}); pages=max(1,(total+size-1)//size)
+   page=max(0,min(page,pages-1)); users=await self.db.users.find({}).sort('created_at',-1).skip(page*size).limit(size).to_list(size)
+   lines=[f'👥 <b>USERS</b> — {total} total', '<i>All accounts are listed, including banned users.</i>', '']
+   for item in users:
+    name=escape(item.get('first_name') or 'Unknown'); username=f'@{escape(item["username"])}' if item.get('username') else 'no username'
+    status='🚫 Banned' if item.get('is_banned') else '✅ Active'
+    lines.append(f'• <b>{name}</b> ({username})\n  <code>{item["telegram_id"]}</code> · {item.get("balance",0)} tokens · {status}')
+   if not users: lines.append('No users have started the bot yet.')
+   rows=[]
+   if pages>1:
+    rows.append([B('◀️ Previous',f'admin:users:page:{page-1}') if page else B('·','noop'),B(f'{page+1}/{pages}','noop'),B('Next ▶️',f'admin:users:page:{page+1}') if page+1<pages else B('·','noop')])
+   rows += [[B('🪙 Change User Tokens','admin:tokens:change')],[B('🏠 Admin Menu','admin:home')]]
+   return await self.edit(q,'\n'.join(lines),K(rows))
+  if section=='tokens' and action=='change':
+   await self.db.admin_sessions.delete_many({'admin_id':q.from_user.id,'kind':'token_change'})
+   await self.db.admin_sessions.insert_one({'admin_id':q.from_user.id,'kind':'token_change','step':'user_id','created_at':now()})
+   return await q.message.reply_text('🪙 <b>CHANGE USER TOKENS</b>\n\nSend the user’s <b>numeric Telegram ID</b>.\n<i>Use /cancel to stop this action.</i>')
   if section=='broadcast': return await self.edit(q,'📢 <b>ʙʀᴏᴀᴅᴄᴀsᴛ</b>\n\nSend the message you want to broadcast, then confirm it in the broadcast workflow.',K([[B('🏠 Admin Menu','admin:home')]]))
   if section=='flow':
    await self.db.admin_sessions.delete_many({'admin_id':q.from_user.id,'kind':'collection'})
@@ -271,6 +299,28 @@ class AppService:
     await self.db.admin_sessions.update_one({'_id':session['_id']},{'$set':{'price':price,'stage':'description'}}); return await m.reply_text('Send an optional <b>description</b>, or send <code>-</code> to skip.')
    description='' if text.strip()=='-' else text.strip()
    await self.db.admin_sessions.update_one({'_id':session['_id']},{'$set':{'description':description,'stage':'cover'}}); return await m.reply_text('Send the collection <b>cover image</b>.')
+  token_flow=await self.db.admin_sessions.find_one({'admin_id':m.from_user.id,'kind':'token_change'})
+  if token_flow and text and not text.startswith('/'):
+   if token_flow['step']=='user_id':
+    try: user_id=int(text.strip())
+    except ValueError:return await m.reply_text('❌ Send only a numeric Telegram ID.')
+    target=await self.db.users.find_one({'telegram_id':user_id})
+    if not target:return await m.reply_text('❌ No user with that Telegram ID has started the bot.')
+    await self.db.admin_sessions.update_one({'_id':token_flow['_id']},{'$set':{'step':'amount','user_id':user_id}})
+    username=f'@{escape(target["username"])}' if target.get('username') else '(no username)'
+    return await m.reply_text(f'👤 <b>User found</b>\nName: {escape(target.get("first_name") or "Unknown")}\nUsername: {username}\nID: <code>{user_id}</code>\nCurrent tokens: <b>{target.get("balance",0)}</b>\n\nSend the <b>new total token amount</b> for this user.')
+   try: new_balance=int(text.strip())
+   except ValueError:return await m.reply_text('❌ Send a whole-number token amount.')
+   if new_balance<0:return await m.reply_text('❌ Token amount cannot be negative.')
+   target=await self.db.users.find_one({'telegram_id':token_flow['user_id']})
+   if not target:
+    await self.db.admin_sessions.delete_one({'_id':token_flow['_id']})
+    return await m.reply_text('❌ That user no longer exists. Start again from Change User Tokens.')
+   previous=target.get('balance',0); difference=new_balance-previous
+   await self.db.users.update_one({'telegram_id':target['telegram_id']},{'$set':{'balance':new_balance}})
+   await self.db.token_transactions.insert_one({'user_id':target['telegram_id'],'amount':difference,'type':'ADMIN_SET','description':f'Admin set balance from {previous} to {new_balance}','created_at':now()})
+   await self.db.admin_sessions.delete_one({'_id':token_flow['_id']})
+   return await m.reply_text(f'✅ Tokens updated for <code>{target["telegram_id"]}</code>.\nPrevious: {previous}\nNew balance: <b>{new_balance}</b>')
   flow=await self.db.admin_sessions.find_one({'admin_id':m.from_user.id,'kind':{'$in':['shortener','category','setting','admin']}})
   if flow and text and not text.startswith('/'):
    if flow['kind']=='admin':
@@ -324,7 +374,8 @@ class AppService:
    if not category:return await m.reply_text('❌ <b>Category not found</b>\n<i>Use the exact active category name.</i>')
    try: media=await self.storage.batch(self.app,first_id,last_id)
    except Exception as exc:return await m.reply_text(f'❌ <b>Storage batch failed</b>\n<i>{str(exc)}</i>')
-   c={'title':values[0],'description':values[5] if len(values)>5 else '','category_id':str(category['_id']),'cover_file_id':media[0]['file_id'],'cover_storage_message_id':media[0]['storage_message_id'],'price':price,'views':0,'unlock_count':0,'media_count':len(media),'active':True,'created_at':now(),'updated_at':now()}
+   cover=next((item for item in media if item.get('file_id')),None)
+   c={'title':values[0],'description':values[5] if len(values)>5 else '','category_id':str(category['_id']),'cover_file_id':cover.get('file_id') if cover else None,'cover_storage_message_id':cover.get('storage_message_id') if cover else None,'price':price,'views':0,'unlock_count':0,'media_count':len(media),'active':True,'created_at':now(),'updated_at':now()}
    result=await self.db.collections.insert_one(c)
    await self.db.collection_media.insert_many([{'collection_id':result.inserted_id,**item,'order':index} for index,item in enumerate(media)])
    return await m.reply_text(f'✅ <b>Batch collection published</b>\n<blockquote>{c["title"]}: {len(media)} storage files imported.</blockquote>')
