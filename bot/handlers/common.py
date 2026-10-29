@@ -38,7 +38,11 @@ def register_common(app,svc):
  async def restart(_,m):
   try:await svc.restart(m)
   except Exception as exc:await report('restart command',m,exc)
- @app.on_message(filters.private & ~filters.command(['start','checkin','admin','cancel','restart']))
+ @app.on_message(filters.private & filters.command('broadcast'))
+ async def broadcast(_,m):
+  try:await svc.broadcast_command(m)
+  except Exception as exc:await report('broadcast command',m,exc)
+ @app.on_message(filters.private & ~filters.command(['start','checkin','admin','cancel','restart','broadcast']))
  async def input_(_,m):
   try:await svc.input(m)
   except Exception as exc:await report('input handler',m,exc)

@@ -11,3 +11,5 @@ async def create_indexes(db):
         await db[collection].create_index(keys, unique=collection in unique)
     await db.collections.create_index('share_token', unique=True, sparse=True)
     await db.shortener_tasks.create_index('expires_at', expireAfterSeconds=0)
+    await db.token_transactions.create_index('idempotency_key', unique=True, sparse=True)
+    await db.payment_requests.create_index('active_user_id', unique=True, sparse=True)

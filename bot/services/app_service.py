@@ -1,6 +1,7 @@
-import asyncio, os, re, sys
+import asyncio, os, re, sys, io
 from html import escape
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 from pyrogram.types import InlineKeyboardButton as B, InlineKeyboardMarkup as K
 from bot.keyboards import user as kb
 from bot.keyboards.admin import main as admin_kb
@@ -87,6 +88,7 @@ class AppService:
   elif action=='task': await self.task(q,u,p[1])
   elif action=='vault': await self.vault(q,u,p[1],int(p[2]))
   elif action=='admin': await self.admin_callback(q,p[1:])
+  elif action=='pay': await self.payment_callback(q,u,p[1:])
  async def menu(self,q,which,u):
   if which=='home':return await self.edit(q,await self.welcome(u),kb.menu())
   if which=='profile':
@@ -109,6 +111,8 @@ class AppService:
     rows[-1].append(B(f'👀 {s["name"]}'[:55],f'task:{s["_id"]}'))
    rows.append([B('🏠 Main Menu','menu:home')]);return await self.edit(q,f'🎀 <b>EARN FREE TOKENS, SENPAI~!</b> ✨\n━━━━━━━━━━━━━━━━━━━━\n\n👛 <b>Your Balance:</b> {u["balance"]} Tokens\n\n1. Tap a task.\n2. Complete sponsor verification.\n3. Return to the bot.\n4. Tokens are added instantly after valid verification.\n\n🌸 Each task has its own cooldown.',K(rows))
   if which=='refer':return await self.edit(q,f'👥 <b>REFER FRIENDS</b>\n\nShare your personal invite link:\nhttps://t.me/{self.config.bot_username}?start={u["telegram_id"]}\n\nEarn {(await self.settings.get())["referral_reward"]} Tokens for each new friend!',kb.back())
+  if which=='buy':
+   s=await self.settings.get();return await self.edit(q,'Choose a token package:\nToken rate: '+str(s.get('tokens_per_rupee',2))+' per ₹1',self.payment_plans(int(s.get('tokens_per_rupee',2))))
   if which=='start':
    s=await self.settings.get()
    if not await self.users.daily_view(u['telegram_id'],s['daily_free_limit']):return await self.edit(q,'🎬 <b>Daily free limit reached</b>\n<blockquote><i>Earn tokens or unlock a collection to keep watching.</i></blockquote>',K([[B('💰 Earn Tokens','menu:earn')],[B('📦 Browse Collections','menu:start'),B('🏠 Main Menu','menu:home')]]))
@@ -134,6 +138,114 @@ class AppService:
    await q.answer('Already unlocked — sending again.' if state=='already' else 'Unlocked! Sending media.')
    s=await self.settings.get(); count=await self.media.deliver(self.app,u['telegram_id'],c,s['cleanup_after_minutes'],s['cleanup_enabled'],s.get('protected_content',False))
    if not count:await q.message.reply_text('⚠️ This collection has no deliverable media. Please contact an admin.')
+ def payment_plans(self,rate=2):
+  return K([[B(f'₹{rupees} · {rupees*rate} tokens',f'pay:plan:{rupees}') for rupees in (20,50)], [B(f'₹{rupees} · {rupees*rate} tokens',f'pay:plan:{rupees}') for rupees in (100,200)], [B('👤 Profile','menu:profile')]])
+ async def payment_callback(self,q,u,p):
+  if not p:return
+  if p[0]=='plans':
+   settings=await self.settings.get()
+   return await self.edit(q,'Choose a token package:\nToken rate: '+str(settings.get('tokens_per_rupee',2))+' per ₹1',K([[B(f'₹{rupees} · {rupees*settings.get("tokens_per_rupee",2)} tokens',f'pay:plan:{rupees}') for rupees in (20,50)],[B(f'₹{rupees} · {rupees*settings.get("tokens_per_rupee",2)} tokens',f'pay:plan:{rupees}') for rupees in (100,200)],[B('👤 Profile','menu:profile')]]))
+  if p[0]=='plan' and len(p)>1:
+   try: rupees=int(p[1])
+   except ValueError:return await q.answer('Invalid package.',show_alert=True)
+   if rupees not in (20,50,100,200):return await q.answer('Invalid package.',show_alert=True)
+   s=await self.settings.get(); upi=s.get('upi_id','').strip()
+   if not upi:return await q.answer('Payments are not configured yet. Contact an admin.',show_alert=True)
+   tokens=rupees*int(s.get('tokens_per_rupee',2)); intent={'user_id':u['telegram_id'],'active_user_id':u['telegram_id'],'rupees':rupees,'tokens':tokens,'status':'awaiting_payment','created_at':now(),'username':u.get('username'),'first_name':u.get('first_name')}
+   active=await self.db.payment_requests.find_one({'user_id':u['telegram_id'],'status':{'$in':['awaiting_payment','awaiting_screenshot','pending','reviewing_approve','reviewing_reject']}})
+   if active and active['status'] in ('pending','reviewing_approve','reviewing_reject'):
+    return await q.answer('Your screenshot is already under review.',show_alert=True)
+   try:
+    if active:
+     await self.db.payment_requests.update_one({'_id':active['_id']},{'$set':intent})
+     request=await self.db.payment_requests.find_one({'_id':active['_id']})
+    else:
+     created=await self.db.payment_requests.insert_one(intent)
+     request=await self.db.payment_requests.find_one({'_id':created.inserted_id})
+   except DuplicateKeyError:
+    return await q.answer('You already have an active payment request.',show_alert=True)
+   uri=f'upi://pay?pa={upi}&pn=Token%20Purchase&am={rupees:.2f}&cu=INR&tn=Tokens%20{tokens}'
+   try:
+    import qrcode
+    image=qrcode.make(uri); buffer=io.BytesIO(); image.save(buffer,format='PNG'); buffer.seek(0)
+   except Exception as exc:
+    log.exception('could not generate UPI QR')
+    return await q.answer('QR generation is unavailable. Please contact an admin.',show_alert=True)
+   caption=f'💳 <b>Token purchase</b>\n\nAmount: <b>₹{rupees}</b>\nTokens: <b>{tokens}</b>\nUPI ID: <code>{escape(upi)}</code>\nAccount: {escape(u.get("first_name") or "User")} (<code>{u["telegram_id"]}</code>)\nPayment reference: <code>{request["_id"]}</code>\n\nPay using this QR, then tap “Send payment screenshot”.'
+   return await q.message.reply_photo(buffer,caption=caption,reply_markup=K([[B('📷 Send payment screenshot',f'pay:screenshot:{request["_id"]}')],[B('❌ Cancel','pay:cancel')]]))
+  if p[0]=='screenshot' and len(p)>1:
+   request=await self.db.payment_requests.find_one({'_id':ObjectId(p[1]),'user_id':u['telegram_id'],'status':'awaiting_payment'})
+   if not request:return await q.answer('This payment request is no longer active.',show_alert=True)
+   await self.db.payment_requests.update_one({'_id':request['_id'],'status':'awaiting_payment'},{'$set':{'status':'awaiting_screenshot'}})
+   return await q.message.reply_text('Please send your payment screenshot as a photo or image document. Use /cancel to cancel.')
+  if p[0]=='cancel':
+   await self.db.payment_requests.update_one({'user_id':u['telegram_id'],'status':{'$in':['awaiting_payment','awaiting_screenshot']}},{'$set':{'status':'cancelled','updated_at':now()},'$unset':{'active_user_id':''}})
+   return await self.edit(q,'Payment request cancelled.',kb.profile())
+ async def submit_payment_screenshot(self,m,request):
+  changed=await self.db.payment_requests.update_one({'_id':request['_id'],'status':'awaiting_screenshot'},{'$set':{'status':'pending','screenshot_message_id':m.id,'submitted_at':now()}})
+  if not changed.modified_count:return await m.reply_text('This screenshot was already submitted. Your payment is being processed.')
+  name=escape(request.get('first_name') or 'User'); username='@'+escape(request['username']) if request.get('username') else '(no username)'
+  caption=f'💳 <b>Token payment review</b>\n\nUser: {name} {username}\nUser ID: <code>{request["user_id"]}</code>\nPayment ID: <code>{request["_id"]}</code>\nPaid: ₹{request["rupees"]}\nTokens requested: {request["tokens"]}\nSubmitted: {now().strftime("%Y-%m-%d %H:%M UTC")}\n\nReview this screenshot and payment.'
+  markup=K([[B('✅ Approve',f'admin:payment:{request["_id"]}:approve'),B('❌ Reject',f'admin:payment:{request["_id"]}:reject')]])
+  admins=await self.db.bot_admins.find({}).to_list(None); ids={*self.config.admin_ids,*(x['telegram_id'] for x in admins)}
+  sent=0
+  for aid in ids:
+   try:
+    await self.app.copy_message(aid,m.chat.id,m.id)
+    await self.app.send_message(aid,caption,reply_markup=markup); sent+=1
+   except Exception:log.exception('could not send payment review to admin_id=%s',aid)
+  await m.reply_text('✅ Screenshot received. Your payment is being processed; please allow 10–15 minutes for review.')
+  if not sent:await self.notify_admins('payment review delivery',RuntimeError('No admin received the payment review'),payment_id=request['_id'],user_id=request['user_id'])
+ async def review_payment(self,q,payment_id,decision):
+  if decision not in ('approve','reject'):return await q.answer('Invalid action.',show_alert=True)
+  try: oid=ObjectId(payment_id)
+  except Exception:return await q.answer('Invalid payment request.',show_alert=True)
+  status='approved' if decision=='approve' else 'rejected'; processing='reviewing_'+decision
+  request=await self.db.payment_requests.find_one_and_update({'_id':oid,'status':'pending'},{'$set':{'status':processing,'reviewed_by':q.from_user.id,'reviewed_at':now()}},return_document=True)
+  if not request:
+   request=await self.db.payment_requests.find_one({'_id':oid,'status':processing})
+   if not request:return await q.answer('Already reviewed, or another decision is being processed.',show_alert=True)
+  if decision=='approve':
+   credited=await self.tokens.credit_payment(request['user_id'],str(oid),request['tokens'],f'Approved UPI payment ₹{request["rupees"]}')
+   if not credited:return await q.answer('User account is unavailable; this review can be retried.',show_alert=True)
+   message=f'✅ Your payment of ₹{request["rupees"]} was approved. {request["tokens"]} tokens have been added to your profile.'
+  else:message='❌ Your payment screenshot was rejected. Please retry with a clear screenshot and correct payment details.'
+  finalized=await self.db.payment_requests.find_one_and_update({'_id':oid,'status':processing},{'$set':{'status':status,'completed_at':now()},'$unset':{'active_user_id':''}},return_document=True)
+  if not finalized:return await q.answer('Payment decision was already completed.',show_alert=True)
+  try:await self.app.send_message(request['user_id'],message)
+  except Exception:log.exception('could not notify user about payment_id=%s',oid)
+  try:await q.message.edit_reply_markup(reply_markup=None)
+  except Exception:pass
+  return await q.answer('Payment '+status+'.')
+ async def broadcast_confirm(self,q,choice):
+  session=await self.db.admin_sessions.find_one({'admin_id':q.from_user.id,'kind':'broadcast','step':'confirm'})
+  if not session:return await q.answer('This broadcast has expired.',show_alert=True)
+  await self.db.admin_sessions.delete_one({'_id':session['_id']})
+  if choice=='cancel':return await self.edit(q,'Broadcast cancelled.',admin_kb())
+  users=self.db.users.find({}, {'telegram_id':1}).sort('telegram_id',1).batch_size(100); sent=failed=0
+  async for user in users:
+   retries=0
+   while True:
+    try:
+     if session.get('source_message_id'):
+      await self.app.copy_message(user['telegram_id'],session['source_chat_id'],session['source_message_id'])
+     else:await self.app.send_message(user['telegram_id'],session['text'],parse_mode=None)
+     sent+=1;break
+    except Exception as exc:
+     if type(exc).__name__=='FloodWait' and retries<3:
+      await asyncio.sleep(max(1,getattr(exc,'value',1)));retries+=1;continue
+     failed+=1;break
+  return await self.edit(q,f'📢 Broadcast finished.\nDelivered: {sent}\nFailed: {failed}',admin_kb())
+ async def broadcast_command(self,m):
+  if not await self.admin_ok(m.from_user.id):return await m.reply_text('❌ Access denied.')
+  text=' '.join(m.command[1:]).strip() if len(m.command)>1 else ''
+  if not text:
+   await self.db.admin_sessions.delete_many({'admin_id':m.from_user.id,'kind':'broadcast'})
+   await self.db.admin_sessions.insert_one({'admin_id':m.from_user.id,'kind':'broadcast','step':'content','created_at':now()})
+   return await m.reply_text('Send the text or media you want to broadcast. It will be shown for confirmation before sending. Use /cancel to stop.')
+  await self.db.admin_sessions.delete_many({'admin_id':m.from_user.id,'kind':'broadcast'})
+  await self.db.admin_sessions.insert_one({'admin_id':m.from_user.id,'kind':'broadcast','step':'confirm','text':text,'created_at':now()})
+  return await m.reply_text(f'<b>Broadcast preview</b>\n\n{escape(text)}',reply_markup=K([[B('✅ Confirm broadcast','admin:broadcast_confirm:send'),B('❌ Cancel','admin:broadcast_confirm:cancel')]]))
  async def task(self,q,u,sid):
   try:s=await self.db.shorteners.find_one({'_id':ObjectId(sid),'enabled':True})
   except Exception:s=None
@@ -213,7 +325,7 @@ class AppService:
    await self.db.admin_sessions.insert_one({'admin_id':q.from_user.id,'kind':'setting','key':action})
    return await q.message.reply_text(f'⚙️ Send a new value for <b>{action}</b>.')
   if section in ('economy','rewards','settings','system'):
-   values=await self.settings.get(); keys={'economy':['daily_free_limit','default_collection_price'],'rewards':['checkin_base_reward','checkin_streak_bonus','referral_reward'],'settings':['cleanup_enabled','cleanup_after_minutes','protected_content'],'system':['maintenance_mode']}[section]
+   values=await self.settings.get(); keys={'economy':['daily_free_limit','default_collection_price','tokens_per_rupee','upi_id'],'rewards':['checkin_base_reward','checkin_streak_bonus','referral_reward'],'settings':['cleanup_enabled','cleanup_after_minutes','protected_content'],'system':['maintenance_mode']}[section]
    rows=[[B(f'{key}: {values.get(key)}',f'admin:set:{key}')] for key in keys]; rows.append([B('🏠 Admin Menu','admin:home')])
    return await self.edit(q,f'⚙️ <b>{section.upper()}</b>\n\nTap a value to update it.',K(rows))
   if section=='collections' and action=='delete' and len(p)>2:
@@ -249,14 +361,29 @@ class AppService:
    await self.db.admin_sessions.delete_many({'admin_id':q.from_user.id,'kind':'token_change'})
    await self.db.admin_sessions.insert_one({'admin_id':q.from_user.id,'kind':'token_change','step':'user_id','created_at':now()})
    return await q.message.reply_text('🪙 <b>CHANGE USER TOKENS</b>\n\nSend the user’s <b>numeric Telegram ID</b>.\n<i>Use /cancel to stop this action.</i>')
-  if section=='broadcast': return await self.edit(q,'📢 <b>ʙʀᴏᴀᴅᴄᴀsᴛ</b>\n\nSend the message you want to broadcast, then confirm it in the broadcast workflow.',K([[B('🏠 Admin Menu','admin:home')]]))
+  if section=='broadcast':
+   await self.db.admin_sessions.delete_many({'admin_id':q.from_user.id,'kind':'broadcast'})
+   await self.db.admin_sessions.insert_one({'admin_id':q.from_user.id,'kind':'broadcast','step':'content','created_at':now()})
+   return await q.message.reply_text('📢 Send the text or media you want to broadcast. It will be shown for confirmation before sending. Use /cancel to stop.')
+  if section=='broadcast_confirm' and len(p)>1:
+   return await self.broadcast_confirm(q,p[1])
+  if section=='payment' and len(p)>2: return await self.review_payment(q,p[1],p[2])
   if section=='flow':
    await self.db.admin_sessions.delete_many({'admin_id':q.from_user.id,'kind':'collection'})
    await self.db.admin_sessions.insert_one({'admin_id':q.from_user.id,'kind':'collection','stage':'title','media':[],'created_at':now()})
    return await q.message.reply_text('🗂 <b>ᴀᴅᴅ ᴄᴏʟʟᴇᴄᴛɪᴏɴ</b>\n\nSend the collection <b>title</b>.')
  async def input(self,m):
+  # Payment uploads come from regular users; process them before the admin-only workflows.
+  if m.photo or (m.document and (m.document.mime_type or '').startswith('image/')):
+   request=await self.db.payment_requests.find_one({'user_id':m.from_user.id,'status':'awaiting_screenshot'})
+   if request:return await self.submit_payment_screenshot(m,request)
   # Guided collection uploads are persisted, so bot restarts do not lose admin state.
   if not await self.admin_ok(m.from_user.id):return
+  broadcast=await self.db.admin_sessions.find_one({'admin_id':m.from_user.id,'kind':'broadcast','step':'content'})
+  if broadcast and not (m.text or m.caption or m.photo or m.video or m.document):return await m.reply_text('Send a text message or supported media.')
+  if broadcast:
+   await self.db.admin_sessions.update_one({'_id':broadcast['_id']},{'$set':{'step':'confirm','source_chat_id':m.chat.id,'source_message_id':m.id}})
+   return await m.reply_text('Preview source saved. Confirm to send it to all registered users.',reply_markup=K([[B('✅ Confirm broadcast','admin:broadcast_confirm:send'),B('❌ Cancel','admin:broadcast_confirm:cancel')]]))
   session=await self.db.admin_sessions.find_one({'admin_id':m.from_user.id,'kind':'collection'})
   if session and (m.photo or m.video) and session.get('stage') in ('cover','media'):
    if session.get('stage')=='cover':
@@ -335,6 +462,9 @@ class AppService:
     value={'true':True,'false':False}.get(text.strip().lower(),text.strip())
     try:value=int(value)
     except (TypeError,ValueError):pass
+    if flow['key']=='tokens_per_rupee' and (not isinstance(value,int) or value<1):return await m.reply_text('Send a whole number greater than zero.')
+    if flow['key']=='daily_free_limit' and (not isinstance(value,int) or value<0):return await m.reply_text('Send a whole number greater than or equal to zero.')
+    if flow['key']=='upi_id' and not re.fullmatch(r'[A-Za-z0-9._-]{2,}@[A-Za-z0-9]{2,}',str(value).strip()):return await m.reply_text('Send a valid UPI ID, for example <code>name@bank</code>.')
     await self.settings.set(flow['key'],value); await self.db.admin_sessions.delete_one({'_id':flow['_id']}); return await m.reply_text(f'✅ <b>{flow["key"]}</b> is now <b>{value}</b>.')
    data=flow.get('data',{}); step=flow['step']; order=['name','api_url','api_key','domain','alias_enabled','reward_tokens','cooldown_hours','alias_prefix']
    if step=='alias_enabled' and text.strip().lower() not in ('true','false'): return await m.reply_text('Please send exactly <b>true</b> or <b>false</b>.')
@@ -409,6 +539,8 @@ class AppService:
   if text.startswith('/tokens ') and len(parts)>=3:
    await self.tokens.change(int(parts[1]),int(parts[2]),'ADMIN_ADD' if int(parts[2])>0 else 'ADMIN_REMOVE','Admin adjustment',earned=int(parts[2])>0,spent=int(parts[2])<0);return await m.reply_text('✅ Token adjustment logged.')
  async def cancel(self,m):
+  payment=await self.db.payment_requests.find_one_and_update({'user_id':m.from_user.id,'status':{'$in':['awaiting_payment','awaiting_screenshot']}},{'$set':{'status':'cancelled','updated_at':now()},'$unset':{'active_user_id':''}})
+  if payment:return await m.reply_text('✅ Payment request cancelled.')
   if not await self.admin_ok(m.from_user.id):return await m.reply_text('❌ <b>Nothing to cancel</b>')
   result=await self.db.admin_sessions.delete_many({'admin_id':m.from_user.id})
   await m.reply_text('✅ <b>Process cancelled</b>\n<i>Your active admin workflow has been cleared.</i>' if result.deleted_count else 'ℹ️ <b>No active process</b>\n<i>There is nothing to cancel.</i>')

@@ -8,7 +8,7 @@ Production-oriented asynchronous Pyrofork/MongoDB bot for gated media collection
 - Atomic balance debit for purchases, unique unlock/save/referral records, configurable UTC daily browsing limit, daily streak rewards, and referral crediting.
 - Provider-neutral shortener records, per-user/provider cooldowns, expiry, minimum verification timing, tolerance, suspicious-activity audit records, and administrator-only recovery from restriction.
 - MongoDB indexes, asynchronous Motor/aiohttp/Pyrofork operations, rate-limited media delivery, cleanup worker, maintenance mode, and error-safe callbacks.
-- `/admin` access is restricted by `ADMIN_IDS`; dashboard exposes collection/category/shortener/economy/user/reward/settings/system/statistics/broadcast areas. Privileged commands are logged through the token ledger.
+- `/admin` access is restricted by `ADMIN_IDS`; dashboard exposes collection/category/shortener/economy/user/reward/settings/system/statistics/payment review and broadcast areas. Admins configure the UPI ID, tokens per rupee (2 by default), and daily free watch limit from Settings. Payment reviews use a single atomic decision, so only one admin can approve or reject a request.
 
 ## Required environment
 
@@ -49,7 +49,7 @@ The bot verifies MongoDB at startup and creates its indexes once. It runs as lon
 
 Admins can temporarily test optional Pyrofork button styling with `/buttonstyles`; this does not alter any production keyboard.
 
-Admin user tools: `/ban ID reason`, `/unban ID`, `/tokens ID +/-amount`. Each balance adjustment receives an immutable transaction log. Reply to broadcast media/text with `/broadcast` in an extended deployment handler.
+Admin user tools: `/ban ID reason`, `/unban ID`, `/tokens ID +/-amount`, and `/broadcast [message]`. Broadcasts require confirmation and are also available from the admin panel. Each balance adjustment receives an immutable transaction log.
 
 Use **Admin → Admins → Add Admin** to grant an additional numeric Telegram ID access to `/admin`; these added administrators are stored in MongoDB and survive restarts. Use `/cancel` to clear your active admin workflow, or `/restart` to restart the bot process.
 
